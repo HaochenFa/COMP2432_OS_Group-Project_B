@@ -99,7 +99,7 @@ pub fn run_demo() {
                             Err(next) => prev = next,
                         }
                     }
-                    if current > 1 {
+                    if current > zones_total {
                         zone_violation.store(true, Ordering::SeqCst);
                     }
                     log_dev!("[ZONE] {name} entered zone {zone} for task {}", task.id);

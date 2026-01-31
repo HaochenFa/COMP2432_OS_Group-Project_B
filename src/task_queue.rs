@@ -96,14 +96,16 @@ mod tests {
     fn pop_blocking_wakes_on_push() {
         let queue = Arc::new(TaskQueue::new());
         let (tx, rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
 
         let queue_clone = Arc::clone(&queue);
         let handle = thread::spawn(move || {
+            ready_tx.send(()).expect("send ready");
             let task = queue_clone.pop_blocking();
             tx.send(task.id).expect("send task id");
         });
 
-        thread::sleep(Duration::from_millis(20));
+        ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready");
         queue.push(Task::new(99, "wake"));
 
         let received = rx.recv_timeout(Duration::from_secs(1)).expect("receive task id");
