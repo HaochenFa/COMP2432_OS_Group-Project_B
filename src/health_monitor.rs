@@ -58,6 +58,12 @@ impl HealthMonitor {
         let guard = self.state.lock().expect("health monitor mutex poisoned");
         guard.offline.clone()
     }
+
+    #[cfg(test)]
+    fn set_last_seen_for_test(&self, robot: RobotId, instant: Instant) {
+        let mut guard = self.state.lock().expect("health monitor mutex poisoned");
+        guard.last_seen.insert(robot, instant);
+    }
 }
 
 #[cfg(test)]
@@ -96,5 +102,15 @@ mod tests {
         assert!(monitor.offline_robots().contains(&robot));
         monitor.heartbeat(robot);
         assert!(!monitor.offline_robots().contains(&robot));
+    }
+
+    #[test]
+    fn deterministic_offline_without_sleep() {
+        let monitor = HealthMonitor::new();
+        let robot = 42;
+        let past = Instant::now() - Duration::from_secs(5);
+        monitor.set_last_seen_for_test(robot, past);
+        let offline = monitor.detect_offline(Duration::from_secs(1));
+        assert!(offline.contains(&robot));
     }
 }
