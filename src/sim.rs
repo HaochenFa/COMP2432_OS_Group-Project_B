@@ -100,19 +100,31 @@ pub fn run_demo() {
 
     let occupied = zones.occupied_zones();
     log_dev!("[ZONE] occupied_zones at end = {}", occupied.len());
+    let offline = monitor.offline_robots();
+    log_dev!(
+        "[HEALTH] offline robots at end = {}",
+        offline.len()
+    );
+    if !offline.is_empty() {
+        log_dev!("[HEALTH] offline set = {:?}", offline);
+    }
     log_dev!(
         "[DEMO] finished in {}ms (dev logs suppressed in release mode)",
         start.elapsed().as_millis()
     );
 }
 
-pub fn run_benchmark() {
+pub fn run_benchmark(
+    robots: Option<usize>,
+    tasks_per_robot: Option<usize>,
+    zones_total: Option<u64>,
+) {
     let queue = Arc::new(TaskQueue::new());
     let zones = Arc::new(ZoneAccess::new());
 
-    let robots = 4usize;
-    let tasks_per_robot = 25usize;
-    let zones_total = 2u64;
+    let robots = robots.unwrap_or(4);
+    let tasks_per_robot = tasks_per_robot.unwrap_or(25);
+    let zones_total = zones_total.unwrap_or(2);
     let total_tasks = robots * tasks_per_robot;
 
     for id in 0..total_tasks {
@@ -154,7 +166,11 @@ pub fn run_benchmark() {
     } else {
         0.0
     };
-    let avg_zone_wait = zone_wait_us.load(Ordering::SeqCst) as f64 / total_tasks as f64;
+    let avg_zone_wait = if total_tasks > 0 {
+        zone_wait_us.load(Ordering::SeqCst) as f64 / total_tasks as f64
+    } else {
+        0.0
+    };
 
     println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us");
     println!(

@@ -8,6 +8,7 @@
   - `cargo run --release`
 - Benchmark (CSV output):
   - `cargo run --release -- bench`
+  - with params: `cargo run --release -- bench <robots> <tasks_per_robot> <zones>`
 
 ## Notes
 
