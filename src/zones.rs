@@ -111,4 +111,24 @@ mod tests {
         assert!(!violation.load(Ordering::SeqCst));
         assert_eq!(max_occupancy.load(Ordering::SeqCst), 1);
     }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "zone release by non-owner")]
+    fn release_by_non_owner_panics_in_debug() {
+        let access = ZoneAccess::new();
+        access.acquire(1, 1);
+        let _ = access.release(1, 2);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn release_by_non_owner_fails_and_keeps_zone() {
+        let access = ZoneAccess::new();
+        access.acquire(1, 1);
+        assert!(!access.release(1, 2));
+        let occupied = access.occupied_zones();
+        assert!(occupied.contains(&1));
+        assert!(access.release(1, 1));
+    }
 }

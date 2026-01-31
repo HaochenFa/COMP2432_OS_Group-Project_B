@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,6 +20,15 @@ pub fn run_demo() {
     let robots = 3;
     let tasks_per_robot = 3;
     let zones_total = 2;
+
+    let per_robot_tasks = Arc::new(
+        (0..robots)
+            .map(|_| AtomicUsize::new(0))
+            .collect::<Vec<_>>(),
+    );
+    let occupancy = Arc::new(AtomicUsize::new(0));
+    let max_occupancy = Arc::new(AtomicUsize::new(0));
+    let zone_violation = Arc::new(AtomicBool::new(false));
 
     for id in 0..(robots * tasks_per_robot) {
         queue.push(Task::new(id as u64, format!("deliver-{id}")));
@@ -61,6 +70,10 @@ pub fn run_demo() {
         let queue = Arc::clone(&queue);
         let zones = Arc::clone(&zones);
         let monitor = Arc::clone(&monitor);
+        let per_robot_tasks = Arc::clone(&per_robot_tasks);
+        let occupancy = Arc::clone(&occupancy);
+        let max_occupancy = Arc::clone(&max_occupancy);
+        let zone_violation = Arc::clone(&zone_violation);
         let name = format!("robot-{robot_id}");
         let handle = thread::Builder::new()
             .name(name.clone())
@@ -69,15 +82,33 @@ pub fn run_demo() {
                 let stop_heartbeat_after = if robot_id == 1 { 2 } else { usize::MAX };
                 while completed < tasks_per_robot {
                     let task = queue.pop_blocking();
+                    per_robot_tasks[robot_id].fetch_add(1, Ordering::SeqCst);
                     log_dev!("[QUEUE] {name} fetched task {}", task.id);
                     let zone = (task.id % zones_total as u64) + 1;
                     zones.acquire(zone, robot_id as u64);
+                    let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
+                    let mut prev = max_occupancy.load(Ordering::SeqCst);
+                    while current > prev {
+                        match max_occupancy.compare_exchange(
+                            prev,
+                            current,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        ) {
+                            Ok(_) => break,
+                            Err(next) => prev = next,
+                        }
+                    }
+                    if current > 1 {
+                        zone_violation.store(true, Ordering::SeqCst);
+                    }
                     log_dev!("[ZONE] {name} entered zone {zone} for task {}", task.id);
                     thread::sleep(Duration::from_millis(80));
                     let released = zones.release(zone, robot_id as u64);
                     if !released {
                         log_dev!("[ZONE] {name} failed to release zone {zone}");
                     }
+                    occupancy.fetch_sub(1, Ordering::SeqCst);
                     log_dev!("[ZONE] {name} left zone {zone} for task {}", task.id);
                     completed += 1;
                     if completed <= stop_heartbeat_after {
@@ -115,6 +146,20 @@ pub fn run_demo() {
         "[DEMO] finished in {}ms (dev logs suppressed in release mode)",
         start.elapsed().as_millis()
     );
+
+    let tasks_done: Vec<usize> = per_robot_tasks
+        .iter()
+        .map(|count| count.load(Ordering::SeqCst))
+        .collect();
+    println!("DEMO SUMMARY");
+    println!("robots={robots} tasks_total={}", robots * tasks_per_robot);
+    println!("tasks_per_robot_done={:?}", tasks_done);
+    println!(
+        "max_zone_occupancy_observed={}",
+        max_occupancy.load(Ordering::SeqCst)
+    );
+    println!("zone_violation={}", zone_violation.load(Ordering::SeqCst));
+    println!("offline_robots={:?}", offline);
 }
 
 pub fn run_benchmark(
