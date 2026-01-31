@@ -74,7 +74,10 @@ pub fn run_demo() {
                     zones.acquire(zone, robot_id as u64);
                     log_dev!("[ZONE] {name} entered zone {zone} for task {}", task.id);
                     thread::sleep(Duration::from_millis(80));
-                    zones.release(zone, robot_id as u64);
+                    let released = zones.release(zone, robot_id as u64);
+                    if !released {
+                        log_dev!("[ZONE] {name} failed to release zone {zone}");
+                    }
                     log_dev!("[ZONE] {name} left zone {zone} for task {}", task.id);
                     completed += 1;
                     if completed <= stop_heartbeat_after {
@@ -148,7 +151,10 @@ pub fn run_benchmark(
                 let waited = wait_start.elapsed().as_micros() as u64;
                 zone_wait_us.fetch_add(waited, Ordering::SeqCst);
                 thread::sleep(Duration::from_millis(5));
-                zones.release(zone, robot_id as u64);
+                let released = zones.release(zone, robot_id as u64);
+                if !released {
+                    log_dev!("[ZONE] bench release failed zone={zone} robot={robot_id}");
+                }
             }
         }));
     }
@@ -177,6 +183,6 @@ pub fn run_benchmark(
         "{robots},{tasks_per_robot},{zones_total},{total_tasks},{elapsed_ms:.2},{throughput:.2},{avg_zone_wait:.2}"
     );
     if leftover > 0 {
-        println!("# warning,leftover_tasks,{}", leftover);
+        eprintln!("# warning,leftover_tasks,{}", leftover);
     }
 }
