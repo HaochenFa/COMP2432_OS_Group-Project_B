@@ -128,6 +128,10 @@ pub fn run_benchmark(
     let robots = robots.unwrap_or(4);
     let tasks_per_robot = tasks_per_robot.unwrap_or(25);
     let zones_total = zones_total.unwrap_or(2);
+    if zones_total == 0 {
+        eprintln!("benchmark error: zones must be > 0");
+        return;
+    }
     let total_tasks = robots * tasks_per_robot;
 
     for id in 0..total_tasks {
