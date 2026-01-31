@@ -27,11 +27,25 @@ impl ZoneAccess {
         }
     }
 
-    pub fn release(&self, zone: ZoneId, robot: RobotId) {
+    pub fn release(&self, zone: ZoneId, robot: RobotId) -> bool {
         let mut guard = self.occupied.lock().expect("zone mutex poisoned");
-        if guard.get(&zone) == Some(&robot) {
-            guard.remove(&zone);
-            self.available.notify_all();
+        match guard.get(&zone) {
+            Some(owner) if *owner == robot => {
+                guard.remove(&zone);
+                self.available.notify_all();
+                true
+            }
+            Some(_) => {
+                debug_assert!(
+                    false,
+                    "zone release by non-owner: zone={zone} robot={robot}"
+                );
+                false
+            }
+            None => {
+                debug_assert!(false, "zone release on unoccupied zone: zone={zone}");
+                false
+            }
         }
     }
 
@@ -86,7 +100,7 @@ mod tests {
                 }
                 thread::sleep(Duration::from_millis(20));
                 occupancy.fetch_sub(1, Ordering::SeqCst);
-                access.release(1, robot_id as u64);
+                assert!(access.release(1, robot_id as u64));
             }));
         }
 
