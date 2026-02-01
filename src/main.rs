@@ -38,7 +38,7 @@ fn parse_u64_list(arg: &str) -> Option<Vec<u64>> {
 fn print_usage(program: &str) {
     eprintln!("Project Blaze CLI");
     eprintln!("Usage:");
-    eprintln!("  {program}                         Run demo");
+    eprintln!("  {program} Run demo");
     eprintln!("  {program} bench [robots] [tasks_per_robot] [zones] [work_ms] [validate] [offline]");
     eprintln!("  {program} stress [robot_sets] [task_sets] [zone_sets] [work_ms] [validate] [offline]");
     eprintln!("  {program} --help");

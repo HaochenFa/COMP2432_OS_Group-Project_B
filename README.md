@@ -8,10 +8,10 @@
   - `cargo run --release`
 - Benchmark (CSV output):
   - `cargo run --release -- bench`
-  - with params: `cargo run --release -- bench <robots> <tasks_per_robot> <zones> <work_ms> [validate] [offline]`
+  - with params: `cargo run --release -- bench [robots] [tasks_per_robot] [zones] [work_ms] [validate] [offline]`
 - Stress sweep (CSV output):
   - `cargo run --release -- stress`
-  - with params: `cargo run --release -- stress <robot_sets> <task_sets> <zone_sets> <work_ms> [validate] [offline]`
+  - with params: `cargo run --release -- stress [robot_sets] [task_sets] [zone_sets] [work_ms] [validate] [offline]`
   - use comma-separated sets like `1,2,4` and `-` to keep defaults for a slot
 
 ## Notes
