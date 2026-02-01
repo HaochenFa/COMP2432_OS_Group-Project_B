@@ -1,3 +1,5 @@
+//! Simulation, benchmark, and stress-test runners for Project Blaze.
+
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,18 +12,28 @@ use crate::task_queue::TaskQueue;
 use crate::types::Task;
 use crate::zones::ZoneAccess;
 
+// Demo/offline timing knobs (small for quick CLI feedback).
 const DEMO_OFFLINE_TIMEOUT_MS: u64 = 200;
 const DEMO_OFFLINE_MAX_WAIT_MS: u64 = 600;
+// Benchmark offline timing (looser to reduce false positives).
 const BENCH_OFFLINE_TIMEOUT_MS: u64 = 500;
 const BENCH_OFFLINE_MAX_WAIT_MS: u64 = 1000;
+// Polling interval used while waiting for offline detection.
 const OFFLINE_POLL_MS: u64 = 50;
 
 #[cfg(unix)]
+/// Best-effort CPU user/system time snapshot (seconds) on Unix platforms.
 fn cpu_times_seconds() -> Option<(f64, f64)> {
-    use libc::{getrusage, rusage, RUSAGE_SELF};
+    use libc::{RUSAGE_SELF, getrusage, rusage};
     let mut usage = rusage {
-        ru_utime: libc::timeval { tv_sec: 0, tv_usec: 0 },
-        ru_stime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_utime: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
+        ru_stime: libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        },
         ru_maxrss: 0,
         ru_ixrss: 0,
         ru_idrss: 0,
@@ -47,10 +59,12 @@ fn cpu_times_seconds() -> Option<(f64, f64)> {
 }
 
 #[cfg(not(unix))]
+/// Stub on non-Unix platforms.
 fn cpu_times_seconds() -> Option<(f64, f64)> {
     None
 }
 
+/// Wait until at least one robot is offline or a max wait is reached.
 fn wait_for_offline(monitor: &HealthMonitor, timeout_ms: u64, max_wait_ms: u64) {
     let max_wait = Duration::from_millis(max_wait_ms);
     let poll = Duration::from_millis(OFFLINE_POLL_MS);
@@ -64,6 +78,7 @@ fn wait_for_offline(monitor: &HealthMonitor, timeout_ms: u64, max_wait_ms: u64) 
     }
 }
 
+/// Pre-size per-zone occupancy counters (index 1..=zones_total).
 fn init_zone_counters(zones_total: usize) -> Vec<AtomicUsize> {
     let mut counters = Vec::with_capacity(zones_total + 1);
     for _ in 0..=zones_total {
@@ -72,6 +87,7 @@ fn init_zone_counters(zones_total: usize) -> Vec<AtomicUsize> {
     counters
 }
 
+/// Aggregated metrics from a single benchmark run.
 struct BenchResult {
     robots: usize,
     tasks_per_robot: usize,
@@ -114,6 +130,7 @@ fn benchmark_once(
     }
     let total_tasks = queue.len();
 
+    // Total wait time across all zone acquisitions for averaging.
     let zone_wait_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let occupancy = Arc::new(AtomicUsize::new(0));
     let max_occupancy = Arc::new(AtomicUsize::new(0));
@@ -164,9 +181,7 @@ fn benchmark_once(
             };
             let mut completed = 0usize;
             while completed < tasks_per_robot {
-                let task = queue
-                    .pop_blocking_or_closed()
-                    .expect("task queue closed");
+                let task = queue.pop_blocking_or_closed().expect("task queue closed");
                 if let Some(seen) = seen_tasks.as_ref() {
                     let mut guard = seen.lock().expect("seen mutex poisoned");
                     if !guard.insert(task.id) {
@@ -180,6 +195,7 @@ fn benchmark_once(
                 zone_wait_us.fetch_add(waited, Ordering::SeqCst);
                 let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
                 let zone_index = zone as usize;
+                // Zone ids are 1-based; index 0 is unused.
                 debug_assert!(zone_index <= zones_len, "zone index out of range");
                 let zone_count = per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst) + 1;
                 if zone_count > 1 {
@@ -212,6 +228,7 @@ fn benchmark_once(
                 }
                 occupancy.fetch_sub(1, Ordering::SeqCst);
                 completed += 1;
+                // Optionally stop heartbeats early to simulate offline detection.
                 if completed <= stop_after {
                     monitor.heartbeat(robot_id as u64);
                 }
@@ -234,6 +251,7 @@ fn benchmark_once(
         .join()
         .expect("health monitor thread panicked");
 
+    // Drain any unexpected leftover tasks for validation reporting.
     let mut leftover = 0usize;
     while queue.try_pop().is_some() {
         leftover += 1;
@@ -276,6 +294,7 @@ fn benchmark_once(
     }
 }
 
+/// Run the default demo showing queueing, zoning, and offline detection.
 pub fn run_demo() {
     log_dev!("[DEMO] start");
 
@@ -287,11 +306,8 @@ pub fn run_demo() {
     let tasks_per_robot = 3;
     let zones_total = 2;
 
-    let per_robot_tasks = Arc::new(
-        (0..robots)
-            .map(|_| AtomicUsize::new(0))
-            .collect::<Vec<_>>(),
-    );
+    // Track per-robot completions for the final summary.
+    let per_robot_tasks = Arc::new((0..robots).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
     let occupancy = Arc::new(AtomicUsize::new(0));
     let max_occupancy = Arc::new(AtomicUsize::new(0));
     let zone_violation = Arc::new(AtomicBool::new(false));
@@ -349,21 +365,20 @@ pub fn run_demo() {
             .name(name.clone())
             .spawn(move || {
                 let mut completed = 0;
+                // Robot 1 stops heartbeats mid-demo to trigger offline detection.
                 let stop_heartbeat_after = if robot_id == 1 { 2 } else { usize::MAX };
                 while completed < tasks_per_robot {
-                    let task = queue
-                        .pop_blocking_or_closed()
-                        .expect("task queue closed");
+                    let task = queue.pop_blocking_or_closed().expect("task queue closed");
                     per_robot_tasks[robot_id].fetch_add(1, Ordering::SeqCst);
                     log_dev!("[QUEUE] {name} fetched task {}", task.id);
                     let zone = (task.id % zones_total as u64) + 1;
                     zones.acquire(zone, robot_id as u64);
                     let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
                     let zone_index = zone as usize;
+                    // Zone ids are 1-based; index 0 is unused.
                     debug_assert!(zone_index <= zones_total, "zone index out of range");
-                    let zone_count = per_zone_occupancy[zone_index]
-                        .fetch_add(1, Ordering::SeqCst)
-                        + 1;
+                    let zone_count =
+                        per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst) + 1;
                     if zone_count > 1 {
                         zone_violation.store(true, Ordering::SeqCst);
                     }
@@ -410,11 +425,7 @@ pub fn run_demo() {
     for handle in handles {
         handle.join().expect("robot thread panicked");
     }
-    wait_for_offline(
-        &monitor,
-        DEMO_OFFLINE_TIMEOUT_MS,
-        DEMO_OFFLINE_MAX_WAIT_MS,
-    );
+    wait_for_offline(&monitor, DEMO_OFFLINE_TIMEOUT_MS, DEMO_OFFLINE_MAX_WAIT_MS);
     stop_flag.store(true, Ordering::SeqCst);
     monitor_thread
         .join()
@@ -423,10 +434,7 @@ pub fn run_demo() {
     let occupied = zones.occupied_zones();
     log_dev!("[ZONE] occupied_zones at end = {}", occupied.len());
     let offline = monitor.offline_robots();
-    log_dev!(
-        "[HEALTH] offline robots at end = {}",
-        offline.len()
-    );
+    log_dev!("[HEALTH] offline robots at end = {}", offline.len());
     if !offline.is_empty() {
         log_dev!("[HEALTH] offline set = {:?}", offline);
     }
@@ -450,6 +458,7 @@ pub fn run_demo() {
     println!("offline_robots={:?}", offline);
 }
 
+/// Run a single benchmark with optional parameter overrides.
 pub fn run_benchmark(
     robots: Option<usize>,
     tasks_per_robot: Option<usize>,
@@ -483,7 +492,9 @@ pub fn run_benchmark(
         simulate_offline,
     );
 
-    println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots");
+    println!(
+        "robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots"
+    );
     let cpu_user = result
         .cpu_user_s
         .map(|v| format!("{v:.4}"))
@@ -521,6 +532,7 @@ pub fn run_benchmark(
     }
 }
 
+/// Sweep multiple benchmark configurations and print CSV output.
 pub fn run_stress(
     robot_sets: Option<Vec<usize>>,
     task_sets: Option<Vec<usize>>,
@@ -558,7 +570,9 @@ pub fn run_stress(
         }
     }
 
-    println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots");
+    println!(
+        "robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots"
+    );
     for robots in robot_sets {
         for tasks_per_robot in task_sets.iter().copied() {
             for zones_total in zone_sets.iter().copied() {

@@ -1,14 +1,18 @@
+//! Zone access control: ensures exclusive occupancy per zone.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Condvar, Mutex};
 
 use crate::types::{RobotId, ZoneId};
 
+/// Tracks zone ownership and blocks until zones become available.
 pub struct ZoneAccess {
     occupied: Mutex<HashMap<ZoneId, RobotId>>,
     available: Condvar,
 }
 
 impl ZoneAccess {
+    /// Create a new, empty zone-access controller.
     pub fn new() -> Self {
         Self {
             occupied: Mutex::new(HashMap::new()),
@@ -16,6 +20,7 @@ impl ZoneAccess {
         }
     }
 
+    /// Acquire the zone for a robot, blocking until the zone is free.
     pub fn acquire(&self, zone: ZoneId, robot: RobotId) {
         let mut guard = self.occupied.lock().expect("zone mutex poisoned");
         loop {
@@ -23,24 +28,26 @@ impl ZoneAccess {
                 guard.insert(zone, robot);
                 return;
             }
+            // Wait releases the lock; on wake, re-check the condition.
             guard = self.available.wait(guard).expect("condvar wait failed");
         }
     }
 
+    /// Release a zone; returns false if the caller is not the owner.
     pub fn release(&self, zone: ZoneId, robot: RobotId) -> bool {
         let mut guard = self.occupied.lock().expect("zone mutex poisoned");
         match guard.get(&zone) {
             Some(owner) if *owner == robot => {
                 guard.remove(&zone);
+                // Wake all contenders so the next robot can acquire the zone.
                 self.available.notify_all();
                 true
             }
             Some(_) => {
+                // Non-owner release indicates a logic error in the caller.
                 #[cfg(not(debug_assertions))]
                 {
-                    eprintln!(
-                        "[ZONE] release by non-owner: zone={zone} robot={robot}"
-                    );
+                    eprintln!("[ZONE] release by non-owner: zone={zone} robot={robot}");
                 }
                 debug_assert!(
                     false,
@@ -49,11 +56,10 @@ impl ZoneAccess {
                 false
             }
             None => {
+                // Releasing an unoccupied zone is also a caller error.
                 #[cfg(not(debug_assertions))]
                 {
-                    eprintln!(
-                        "[ZONE] release on unoccupied zone: zone={zone}"
-                    );
+                    eprintln!("[ZONE] release on unoccupied zone: zone={zone}");
                 }
                 debug_assert!(false, "zone release on unoccupied zone: zone={zone}");
                 false
@@ -61,6 +67,7 @@ impl ZoneAccess {
         }
     }
 
+    /// Snapshot of zones that are currently occupied.
     pub fn occupied_zones(&self) -> HashSet<ZoneId> {
         let guard = self.occupied.lock().expect("zone mutex poisoned");
         guard.keys().copied().collect()
@@ -110,6 +117,7 @@ mod tests {
                 if current > 1 {
                     violation.store(true, Ordering::SeqCst);
                 }
+                // Hold the zone briefly to force contention.
                 thread::sleep(Duration::from_millis(20));
                 occupancy.fetch_sub(1, Ordering::SeqCst);
                 assert!(access.release(1, robot_id as u64));
