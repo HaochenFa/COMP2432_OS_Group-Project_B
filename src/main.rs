@@ -43,13 +43,20 @@ fn print_usage(program: &str) {
     println!("  {program} stress [robot_sets] [task_sets] [zone_sets] [work_ms] [validate] [offline]");
     println!("  {program} --help");
     println!();
-    println!("Sets are comma-separated lists (e.g., 1,2,4). Use \"-\" to keep defaults for a slot.");
+    println!("Sets are comma-separated lists (e.g., 1,2,4). Use \"-\" to keep defaults for robot/task/zone sets.");
+    println!("Omit work_ms to keep its default.");
     println!("Defaults:");
     println!("  bench  robots=4 tasks_per_robot=25 zones=2 work_ms=5");
     println!("  stress robots=1,2,4,8,12 tasks_per_robot=10,25,50 zones=1,2,4 work_ms=5");
     println!("Flags:");
     println!("  validate  enable extra safety checks");
     println!("  offline   simulate a robot going offline");
+}
+
+fn exit_with_usage(program: &str, message: &str) -> ! {
+    eprintln!("{message}");
+    print_usage(program);
+    std::process::exit(2);
 }
 
 fn main() {
@@ -98,42 +105,56 @@ fn main() {
                     _ => {}
                 }
 
+                let mut consumed = false;
                 if robot_sets.is_none() && !robot_sets_skipped {
                     if arg == "-" {
                         robot_sets_skipped = true;
-                        continue;
-                    }
-                    if let Some(values) = parse_usize_list(&arg) {
+                        consumed = true;
+                    } else if let Some(values) = parse_usize_list(&arg) {
                         robot_sets = Some(values);
-                        continue;
+                        consumed = true;
                     }
+                    if !consumed {
+                        exit_with_usage(&program, &format!("stress: invalid robot_sets value: {arg}"));
+                    }
+                    continue;
                 }
                 if task_sets.is_none() && !task_sets_skipped {
                     if arg == "-" {
                         task_sets_skipped = true;
-                        continue;
-                    }
-                    if let Some(values) = parse_usize_list(&arg) {
+                        consumed = true;
+                    } else if let Some(values) = parse_usize_list(&arg) {
                         task_sets = Some(values);
-                        continue;
+                        consumed = true;
                     }
+                    if !consumed {
+                        exit_with_usage(&program, &format!("stress: invalid task_sets value: {arg}"));
+                    }
+                    continue;
                 }
                 if zone_sets.is_none() && !zone_sets_skipped {
                     if arg == "-" {
                         zone_sets_skipped = true;
-                        continue;
-                    }
-                    if let Some(values) = parse_u64_list(&arg) {
+                        consumed = true;
+                    } else if let Some(values) = parse_u64_list(&arg) {
                         zone_sets = Some(values);
-                        continue;
+                        consumed = true;
                     }
+                    if !consumed {
+                        exit_with_usage(&program, &format!("stress: invalid zone_sets value: {arg}"));
+                    }
+                    continue;
                 }
                 if work_ms.is_none() {
                     if let Ok(value) = arg.parse::<u64>() {
                         work_ms = Some(value);
-                        continue;
+                    } else {
+                        exit_with_usage(&program, &format!("stress: invalid work_ms value: {arg}"));
                     }
+                    continue;
                 }
+
+                exit_with_usage(&program, &format!("stress: unexpected argument: {arg}"));
             }
 
             sim::run_stress(
@@ -147,8 +168,7 @@ fn main() {
         }
         Some("--help") | Some("-h") | Some("help") => print_usage(&program),
         Some(other) => {
-            eprintln!("unknown command: {other}");
-            print_usage(&program);
+            exit_with_usage(&program, &format!("unknown command: {other}"));
         }
         None => sim::run_demo(),
     }
