@@ -46,7 +46,7 @@ fn print_usage(program: &str) {
     println!("Sets are comma-separated lists (e.g., 1,2,4). Use \"-\" to keep defaults for a slot.");
     println!("Defaults:");
     println!("  bench  robots=4 tasks_per_robot=25 zones=2 work_ms=5");
-    println!("  stress robots=1,2,4,8,12 tasks=10,25,50 zones=1,2,4 work_ms=5");
+    println!("  stress robots=1,2,4,8,12 tasks_per_robot=10,25,50 zones=1,2,4 work_ms=5");
     println!("Flags:");
     println!("  validate  enable extra safety checks");
     println!("  offline   simulate a robot going offline");
@@ -79,6 +79,9 @@ fn main() {
             let mut task_sets: Option<Vec<usize>> = None;
             let mut zone_sets: Option<Vec<u64>> = None;
             let mut work_ms: Option<u64> = None;
+            let mut robot_sets_skipped = false;
+            let mut task_sets_skipped = false;
+            let mut zone_sets_skipped = false;
             let mut validate = false;
             let mut simulate_offline = false;
 
@@ -95,9 +98,9 @@ fn main() {
                     _ => {}
                 }
 
-                if robot_sets.is_none() {
+                if robot_sets.is_none() && !robot_sets_skipped {
                     if arg == "-" {
-                        robot_sets = Some(Vec::new());
+                        robot_sets_skipped = true;
                         continue;
                     }
                     if let Some(values) = parse_usize_list(&arg) {
@@ -105,9 +108,9 @@ fn main() {
                         continue;
                     }
                 }
-                if task_sets.is_none() {
+                if task_sets.is_none() && !task_sets_skipped {
                     if arg == "-" {
-                        task_sets = Some(Vec::new());
+                        task_sets_skipped = true;
                         continue;
                     }
                     if let Some(values) = parse_usize_list(&arg) {
@@ -115,9 +118,9 @@ fn main() {
                         continue;
                     }
                 }
-                if zone_sets.is_none() {
+                if zone_sets.is_none() && !zone_sets_skipped {
                     if arg == "-" {
-                        zone_sets = Some(Vec::new());
+                        zone_sets_skipped = true;
                         continue;
                     }
                     if let Some(values) = parse_u64_list(&arg) {

@@ -70,25 +70,7 @@ fn benchmark_once(
     validate: bool,
     simulate_offline: bool,
 ) -> BenchResult {
-    if zones_total == 0 {
-        eprintln!("benchmark error: zones must be > 0");
-        return BenchResult {
-            robots,
-            tasks_per_robot,
-            zones_total,
-            total_tasks: 0,
-            elapsed_ms: 0.0,
-            throughput: 0.0,
-            avg_zone_wait_us: 0.0,
-            cpu_user_s: None,
-            cpu_sys_s: None,
-            leftover: 0,
-            max_occupancy: 0,
-            zone_violation: false,
-            duplicate_tasks: false,
-            offline_count: 0,
-        };
-    }
+    debug_assert!(zones_total > 0, "zones_total must be > 0");
     let queue = Arc::new(TaskQueue::new());
     let zones = Arc::new(ZoneAccess::new());
     let monitor = Arc::new(HealthMonitor::new());
@@ -470,18 +452,9 @@ pub fn run_stress(
     let default_zone_sets = [1u64, 2, 4];
     let work_ms = work_ms.unwrap_or(5);
 
-    let robot_sets = match robot_sets {
-        Some(values) if !values.is_empty() => values,
-        _ => default_robot_sets.to_vec(),
-    };
-    let task_sets = match task_sets {
-        Some(values) if !values.is_empty() => values,
-        _ => default_task_sets.to_vec(),
-    };
-    let zone_sets = match zone_sets {
-        Some(values) if !values.is_empty() => values,
-        _ => default_zone_sets.to_vec(),
-    };
+    let robot_sets = robot_sets.unwrap_or_else(|| default_robot_sets.to_vec());
+    let task_sets = task_sets.unwrap_or_else(|| default_task_sets.to_vec());
+    let zone_sets = zone_sets.unwrap_or_else(|| default_zone_sets.to_vec());
 
     println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots");
     for robots in robot_sets {
