@@ -35,7 +35,27 @@ fn parse_u64_list(arg: &str) -> Option<Vec<u64>> {
     Some(values)
 }
 
+fn print_usage(program: &str) {
+    eprintln!("Project Blaze CLI");
+    eprintln!("Usage:");
+    eprintln!("  {program}                         Run demo");
+    eprintln!("  {program} bench [robots] [tasks_per_robot] [zones] [work_ms] [validate] [offline]");
+    eprintln!("  {program} stress [robot_sets] [task_sets] [zone_sets] [work_ms] [validate] [offline]");
+    eprintln!("  {program} --help");
+    eprintln!();
+    eprintln!("Sets are comma-separated lists (e.g., 1,2,4). Use \"-\" to keep defaults for a slot.");
+    eprintln!("Defaults:");
+    eprintln!("  bench  robots=4 tasks_per_robot=25 zones=2 work_ms=5");
+    eprintln!("  stress robots=1,2,4,8,12 tasks=10,25,50 zones=1,2,4 work_ms=5");
+    eprintln!("Flags:");
+    eprintln!("  validate  enable extra safety checks");
+    eprintln!("  offline   simulate a robot going offline");
+}
+
 fn main() {
+    let program = std::env::args()
+        .next()
+        .unwrap_or_else(|| "project_blaze".to_string());
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("bench") => {
@@ -76,18 +96,30 @@ fn main() {
                 }
 
                 if robot_sets.is_none() {
+                    if arg == "-" {
+                        robot_sets = Some(Vec::new());
+                        continue;
+                    }
                     if let Some(values) = parse_usize_list(&arg) {
                         robot_sets = Some(values);
                         continue;
                     }
                 }
                 if task_sets.is_none() {
+                    if arg == "-" {
+                        task_sets = Some(Vec::new());
+                        continue;
+                    }
                     if let Some(values) = parse_usize_list(&arg) {
                         task_sets = Some(values);
                         continue;
                     }
                 }
                 if zone_sets.is_none() {
+                    if arg == "-" {
+                        zone_sets = Some(Vec::new());
+                        continue;
+                    }
                     if let Some(values) = parse_u64_list(&arg) {
                         zone_sets = Some(values);
                         continue;
@@ -110,6 +142,11 @@ fn main() {
                 simulate_offline,
             );
         }
-        _ => sim::run_demo(),
+        Some("--help") | Some("-h") | Some("help") => print_usage(&program),
+        Some(other) => {
+            eprintln!("unknown command: {other}");
+            print_usage(&program);
+        }
+        None => sim::run_demo(),
     }
 }
