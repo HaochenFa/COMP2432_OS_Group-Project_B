@@ -10,6 +10,10 @@ use crate::task_queue::TaskQueue;
 use crate::types::Task;
 use crate::zones::ZoneAccess;
 
+const DEMO_OFFLINE_MAX_WAIT_MS: u64 = 600;
+const BENCH_OFFLINE_MAX_WAIT_MS: u64 = 1000;
+const OFFLINE_POLL_MS: u64 = 50;
+
 #[cfg(unix)]
 fn cpu_times_seconds() -> Option<(f64, f64)> {
     use libc::{getrusage, rusage, RUSAGE_SELF};
@@ -43,6 +47,18 @@ fn cpu_times_seconds() -> Option<(f64, f64)> {
 #[cfg(not(unix))]
 fn cpu_times_seconds() -> Option<(f64, f64)> {
     None
+}
+
+fn wait_for_offline(monitor: &HealthMonitor, max_wait_ms: u64) {
+    let max_wait = Duration::from_millis(max_wait_ms);
+    let poll = Duration::from_millis(OFFLINE_POLL_MS);
+    let start = Instant::now();
+    loop {
+        if !monitor.offline_robots().is_empty() || start.elapsed() >= max_wait {
+            return;
+        }
+        thread::sleep(poll);
+    }
 }
 
 struct BenchResult {
@@ -176,6 +192,9 @@ fn benchmark_once(
 
     for handle in handles {
         handle.join().expect("benchmark thread panicked");
+    }
+    if simulate_offline {
+        wait_for_offline(&monitor, BENCH_OFFLINE_MAX_WAIT_MS);
     }
     stop_flag.store(true, Ordering::SeqCst);
     monitor_thread
@@ -341,6 +360,7 @@ pub fn run_demo() {
     for handle in handles {
         handle.join().expect("robot thread panicked");
     }
+    wait_for_offline(&monitor, DEMO_OFFLINE_MAX_WAIT_MS);
     stop_flag.store(true, Ordering::SeqCst);
     monitor_thread
         .join()

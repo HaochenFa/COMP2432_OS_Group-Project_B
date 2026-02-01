@@ -43,11 +43,11 @@ fn write_usage<W: Write>(out: &mut W, program: &str) {
     let _ = writeln!(out, "  {program} (run demo)");
     let _ = writeln!(
         out,
-        "  {program} bench [robots] [tasks_per_robot] [zones] [work_ms] [validate] [offline]"
+        "  {program} bench [robots] [tasks_per_robot] [zones] [work_ms] [validate] [offline-demo]"
     );
     let _ = writeln!(
         out,
-        "  {program} stress [robot_sets] [task_sets] [zone_sets] [work_ms] [validate] [offline]"
+        "  {program} stress [robot_sets] [task_sets] [zone_sets] [work_ms] [validate] [offline-demo]"
     );
     let _ = writeln!(out, "  {program} --help");
     let _ = writeln!(out);
@@ -63,8 +63,11 @@ fn write_usage<W: Write>(out: &mut W, program: &str) {
         "  stress robots=1,2,4,8,12 tasks_per_robot=10,25,50 zones=1,2,4 work_ms=5"
     );
     let _ = writeln!(out, "Flags:");
-    let _ = writeln!(out, "  validate  enable extra safety checks");
-    let _ = writeln!(out, "  offline   simulate a robot going offline");
+    let _ = writeln!(out, "  validate       enable extra safety checks");
+    let _ = writeln!(
+        out,
+        "  offline-demo   simulate a robot going offline (alias: offline)"
+    );
 }
 
 fn print_usage_stdout(program: &str) {
@@ -99,7 +102,7 @@ fn main() {
             for arg in args {
                 match arg.as_str() {
                     "validate" => validate = true,
-                    "offline" => simulate_offline = true,
+                    "offline" | "offline-demo" | "--offline-demo" => simulate_offline = true,
                     _ => {
                         if robots.is_none() {
                             robots = arg.parse::<usize>().ok();
@@ -160,7 +163,7 @@ fn main() {
                         validate = true;
                         continue;
                     }
-                    "offline" => {
+                    "offline" | "offline-demo" | "--offline-demo" => {
                         simulate_offline = true;
                         continue;
                     }
