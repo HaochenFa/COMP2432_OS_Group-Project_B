@@ -70,6 +70,7 @@ fn benchmark_once(
     validate: bool,
     simulate_offline: bool,
 ) -> BenchResult {
+    debug_assert!(zones_total > 0, "zones_total must be > 0");
     let queue = Arc::new(TaskQueue::new());
     let zones = Arc::new(ZoneAccess::new());
     let monitor = Arc::new(HealthMonitor::new());
@@ -453,7 +454,19 @@ pub fn run_stress(
 
     let robot_sets = robot_sets.unwrap_or_else(|| default_robot_sets.to_vec());
     let task_sets = task_sets.unwrap_or_else(|| default_task_sets.to_vec());
-    let zone_sets = zone_sets.unwrap_or_else(|| default_zone_sets.to_vec());
+    let mut zone_sets = zone_sets.unwrap_or_else(|| default_zone_sets.to_vec());
+    if zone_sets.iter().any(|&zones| zones == 0) {
+        let before = zone_sets.len();
+        zone_sets.retain(|&zones| zones > 0);
+        let dropped = before.saturating_sub(zone_sets.len());
+        if dropped > 0 {
+            eprintln!("stress warning: ignored {dropped} zone set(s) <= 0");
+        }
+        if zone_sets.is_empty() {
+            eprintln!("stress error: zones must be > 0");
+            return;
+        }
+    }
 
     println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots");
     for robots in robot_sets {
