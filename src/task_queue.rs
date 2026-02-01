@@ -4,42 +4,71 @@ use std::sync::{Condvar, Mutex};
 use crate::types::Task;
 
 pub struct TaskQueue {
-    inner: Mutex<VecDeque<Task>>,
+    inner: Mutex<TaskQueueState>,
     available: Condvar,
+}
+
+struct TaskQueueState {
+    queue: VecDeque<Task>,
+    closed: bool,
 }
 
 impl TaskQueue {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(VecDeque::new()),
+            inner: Mutex::new(TaskQueueState {
+                queue: VecDeque::new(),
+                closed: false,
+            }),
             available: Condvar::new(),
         }
     }
 
-    pub fn push(&self, task: Task) {
+    pub fn push(&self, task: Task) -> Result<(), Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
-        guard.push_back(task);
+        if guard.closed {
+            return Err(task);
+        }
+        guard.queue.push_back(task);
         self.available.notify_one();
+        Ok(())
     }
 
     pub fn try_pop(&self) -> Option<Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
-        guard.pop_front()
+        guard.queue.pop_front()
     }
 
+    #[deprecated(note = "use pop_blocking_or_closed for shutdown-aware waits")]
+    #[allow(dead_code)]
     pub fn pop_blocking(&self) -> Task {
+        self.pop_blocking_or_closed()
+            .expect("task queue closed")
+    }
+
+    pub fn pop_blocking_or_closed(&self) -> Option<Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
         loop {
-            if let Some(task) = guard.pop_front() {
-                return task;
+            if let Some(task) = guard.queue.pop_front() {
+                return Some(task);
+            }
+            if guard.closed {
+                return None;
             }
             guard = self.available.wait(guard).expect("condvar wait failed");
         }
     }
 
+    #[allow(dead_code)]
+    pub fn close(&self) {
+        let mut guard = self.inner.lock().expect("task queue mutex poisoned");
+        guard.closed = true;
+        self.available.notify_all();
+    }
+
     pub fn len(&self) -> usize {
         let guard = self.inner.lock().expect("task queue mutex poisoned");
-        guard.len()
+        guard.queue.len()
     }
 }
 
@@ -57,7 +86,9 @@ mod tests {
         let queue = Arc::new(TaskQueue::new());
         let total_tasks = 100;
         for id in 0..total_tasks {
-            queue.push(Task::new(id, format!("task-{id}")));
+            queue
+                .push(Task::new(id, format!("task-{id}")))
+                .expect("task queue closed");
         }
 
         let consumers = 4;
@@ -101,12 +132,16 @@ mod tests {
         let queue_clone = Arc::clone(&queue);
         let handle = thread::spawn(move || {
             ready_tx.send(()).expect("send ready");
-            let task = queue_clone.pop_blocking();
+            let task = queue_clone
+                .pop_blocking_or_closed()
+                .expect("task queue closed");
             tx.send(task.id).expect("send task id");
         });
 
         ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready");
-        queue.push(Task::new(99, "wake"));
+        queue
+            .push(Task::new(99, "wake"))
+            .expect("task queue closed");
 
         let received = rx.recv_timeout(Duration::from_secs(1)).expect("receive task id");
         assert_eq!(received, 99);
@@ -130,7 +165,9 @@ mod tests {
             handles.push(thread::spawn(move || {
                 barrier.wait();
                 ready_tx.send(()).expect("ready");
-                let task = queue.pop_blocking();
+                let task = queue
+                    .pop_blocking_or_closed()
+                    .expect("task queue closed");
                 done_tx.send(task.id).expect("done");
             }));
         }
@@ -140,7 +177,9 @@ mod tests {
         }
 
         for id in 0..consumers as u64 {
-            queue.push(Task::new(id, format!("task-{id}")));
+            queue
+                .push(Task::new(id, format!("task-{id}")))
+                .expect("task queue closed");
         }
 
         let mut seen = HashSet::new();
@@ -155,5 +194,36 @@ mod tests {
             handle.join().expect("consumer thread panicked");
         }
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn pop_blocking_or_closed_unblocks_on_close() {
+        let queue = Arc::new(TaskQueue::new());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let queue_clone = Arc::clone(&queue);
+        let handle = thread::spawn(move || {
+            ready_tx.send(()).expect("ready");
+            let task = queue_clone.pop_blocking_or_closed();
+            done_tx.send(task.is_none()).expect("done");
+        });
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready");
+        queue.close();
+
+        let closed = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("done recv");
+        assert!(closed);
+        handle.join().expect("consumer thread panicked");
+    }
+
+    #[test]
+    fn push_fails_after_close() {
+        let queue = TaskQueue::new();
+        queue.close();
+        let result = queue.push(Task::new(1, "late"));
+        assert!(result.is_err());
     }
 }

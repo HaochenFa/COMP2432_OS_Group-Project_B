@@ -36,6 +36,12 @@ impl ZoneAccess {
                 true
             }
             Some(_) => {
+                #[cfg(not(debug_assertions))]
+                {
+                    eprintln!(
+                        "[ZONE] release by non-owner: zone={zone} robot={robot}"
+                    );
+                }
                 debug_assert!(
                     false,
                     "zone release by non-owner: zone={zone} robot={robot}"
@@ -43,6 +49,12 @@ impl ZoneAccess {
                 false
             }
             None => {
+                #[cfg(not(debug_assertions))]
+                {
+                    eprintln!(
+                        "[ZONE] release on unoccupied zone: zone={zone}"
+                    );
+                }
                 debug_assert!(false, "zone release on unoccupied zone: zone={zone}");
                 false
             }
