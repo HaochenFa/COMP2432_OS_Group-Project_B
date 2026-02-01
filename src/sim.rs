@@ -10,7 +10,9 @@ use crate::task_queue::TaskQueue;
 use crate::types::Task;
 use crate::zones::ZoneAccess;
 
+const DEMO_OFFLINE_TIMEOUT_MS: u64 = 200;
 const DEMO_OFFLINE_MAX_WAIT_MS: u64 = 600;
+const BENCH_OFFLINE_TIMEOUT_MS: u64 = 500;
 const BENCH_OFFLINE_MAX_WAIT_MS: u64 = 1000;
 const OFFLINE_POLL_MS: u64 = 50;
 
@@ -49,16 +51,25 @@ fn cpu_times_seconds() -> Option<(f64, f64)> {
     None
 }
 
-fn wait_for_offline(monitor: &HealthMonitor, max_wait_ms: u64) {
+fn wait_for_offline(monitor: &HealthMonitor, timeout_ms: u64, max_wait_ms: u64) {
     let max_wait = Duration::from_millis(max_wait_ms);
     let poll = Duration::from_millis(OFFLINE_POLL_MS);
+    let timeout = Duration::from_millis(timeout_ms);
     let start = Instant::now();
     loop {
-        if !monitor.offline_robots().is_empty() || start.elapsed() >= max_wait {
+        if !monitor.detect_offline(timeout).is_empty() || start.elapsed() >= max_wait {
             return;
         }
         thread::sleep(poll);
     }
+}
+
+fn init_zone_counters(zones_total: usize) -> Vec<AtomicUsize> {
+    let mut counters = Vec::with_capacity(zones_total + 1);
+    for _ in 0..=zones_total {
+        counters.push(AtomicUsize::new(0));
+    }
+    counters
 }
 
 struct BenchResult {
@@ -86,7 +97,10 @@ fn benchmark_once(
     validate: bool,
     simulate_offline: bool,
 ) -> BenchResult {
+    debug_assert!(robots > 0, "robots must be > 0");
+    debug_assert!(tasks_per_robot > 0, "tasks_per_robot must be > 0");
     debug_assert!(zones_total > 0, "zones_total must be > 0");
+    let zones_len = zones_total as usize;
     let queue = Arc::new(TaskQueue::new());
     let zones = Arc::new(ZoneAccess::new());
     let monitor = Arc::new(HealthMonitor::new());
@@ -102,6 +116,7 @@ fn benchmark_once(
     let occupancy = Arc::new(AtomicUsize::new(0));
     let max_occupancy = Arc::new(AtomicUsize::new(0));
     let zone_violation = Arc::new(AtomicBool::new(false));
+    let per_zone_occupancy = Arc::new(init_zone_counters(zones_len));
     let duplicate_tasks = Arc::new(AtomicBool::new(false));
     let seen_tasks = if validate {
         Some(Arc::new(Mutex::new(HashSet::new())))
@@ -117,7 +132,7 @@ fn benchmark_once(
         let monitor = Arc::clone(&monitor);
         let stop_flag = Arc::clone(&stop_flag);
         thread::spawn(move || {
-            let timeout = Duration::from_millis(500);
+            let timeout = Duration::from_millis(BENCH_OFFLINE_TIMEOUT_MS);
             while !stop_flag.load(Ordering::SeqCst) {
                 let _ = monitor.detect_offline(timeout);
                 thread::sleep(Duration::from_millis(100));
@@ -136,6 +151,7 @@ fn benchmark_once(
         let occupancy = Arc::clone(&occupancy);
         let max_occupancy = Arc::clone(&max_occupancy);
         let zone_violation = Arc::clone(&zone_violation);
+        let per_zone_occupancy = Arc::clone(&per_zone_occupancy);
         let duplicate_tasks = Arc::clone(&duplicate_tasks);
         let seen_tasks = seen_tasks.as_ref().map(Arc::clone);
         handles.push(thread::spawn(move || {
@@ -159,6 +175,12 @@ fn benchmark_once(
                 let waited = wait_start.elapsed().as_micros() as u64;
                 zone_wait_us.fetch_add(waited, Ordering::SeqCst);
                 let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
+                let zone_index = zone as usize;
+                debug_assert!(zone_index <= zones_len, "zone index out of range");
+                let zone_count = per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst) + 1;
+                if zone_count > 1 {
+                    zone_violation.store(true, Ordering::SeqCst);
+                }
                 let mut prev = max_occupancy.load(Ordering::SeqCst);
                 while current > prev {
                     match max_occupancy.compare_exchange(
@@ -171,7 +193,7 @@ fn benchmark_once(
                         Err(next) => prev = next,
                     }
                 }
-                if current > zones_total as usize {
+                if current > zones_len {
                     zone_violation.store(true, Ordering::SeqCst);
                 }
                 if work_ms > 0 {
@@ -180,6 +202,9 @@ fn benchmark_once(
                 let released = zones.release(zone, robot_id as u64);
                 if !released {
                     log_dev!("[ZONE] bench release failed zone={zone} robot={robot_id}");
+                }
+                if released {
+                    per_zone_occupancy[zone_index].fetch_sub(1, Ordering::SeqCst);
                 }
                 occupancy.fetch_sub(1, Ordering::SeqCst);
                 completed += 1;
@@ -194,7 +219,11 @@ fn benchmark_once(
         handle.join().expect("benchmark thread panicked");
     }
     if simulate_offline {
-        wait_for_offline(&monitor, BENCH_OFFLINE_MAX_WAIT_MS);
+        wait_for_offline(
+            &monitor,
+            BENCH_OFFLINE_TIMEOUT_MS,
+            BENCH_OFFLINE_MAX_WAIT_MS,
+        );
     }
     stop_flag.store(true, Ordering::SeqCst);
     monitor_thread
@@ -262,6 +291,7 @@ pub fn run_demo() {
     let occupancy = Arc::new(AtomicUsize::new(0));
     let max_occupancy = Arc::new(AtomicUsize::new(0));
     let zone_violation = Arc::new(AtomicBool::new(false));
+    let per_zone_occupancy = Arc::new(init_zone_counters(zones_total));
 
     for id in 0..(robots * tasks_per_robot) {
         queue.push(Task::new(id as u64, format!("deliver-{id}")));
@@ -283,7 +313,7 @@ pub fn run_demo() {
         thread::Builder::new()
             .name("health-monitor".to_string())
             .spawn(move || {
-                let timeout = Duration::from_millis(200);
+                let timeout = Duration::from_millis(DEMO_OFFLINE_TIMEOUT_MS);
                 let mut already_offline = HashSet::new();
                 while !stop_flag.load(Ordering::SeqCst) {
                     let offline = monitor.detect_offline(timeout);
@@ -307,6 +337,7 @@ pub fn run_demo() {
         let occupancy = Arc::clone(&occupancy);
         let max_occupancy = Arc::clone(&max_occupancy);
         let zone_violation = Arc::clone(&zone_violation);
+        let per_zone_occupancy = Arc::clone(&per_zone_occupancy);
         let name = format!("robot-{robot_id}");
         let handle = thread::Builder::new()
             .name(name.clone())
@@ -320,6 +351,14 @@ pub fn run_demo() {
                     let zone = (task.id % zones_total as u64) + 1;
                     zones.acquire(zone, robot_id as u64);
                     let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
+                    let zone_index = zone as usize;
+                    debug_assert!(zone_index <= zones_total, "zone index out of range");
+                    let zone_count = per_zone_occupancy[zone_index]
+                        .fetch_add(1, Ordering::SeqCst)
+                        + 1;
+                    if zone_count > 1 {
+                        zone_violation.store(true, Ordering::SeqCst);
+                    }
                     let mut prev = max_occupancy.load(Ordering::SeqCst);
                     while current > prev {
                         match max_occupancy.compare_exchange(
@@ -341,6 +380,9 @@ pub fn run_demo() {
                     if !released {
                         log_dev!("[ZONE] {name} failed to release zone {zone}");
                     }
+                    if released {
+                        per_zone_occupancy[zone_index].fetch_sub(1, Ordering::SeqCst);
+                    }
                     occupancy.fetch_sub(1, Ordering::SeqCst);
                     log_dev!("[ZONE] {name} left zone {zone} for task {}", task.id);
                     completed += 1;
@@ -360,7 +402,11 @@ pub fn run_demo() {
     for handle in handles {
         handle.join().expect("robot thread panicked");
     }
-    wait_for_offline(&monitor, DEMO_OFFLINE_MAX_WAIT_MS);
+    wait_for_offline(
+        &monitor,
+        DEMO_OFFLINE_TIMEOUT_MS,
+        DEMO_OFFLINE_MAX_WAIT_MS,
+    );
     stop_flag.store(true, Ordering::SeqCst);
     monitor_thread
         .join()
@@ -408,6 +454,14 @@ pub fn run_benchmark(
     let tasks_per_robot = tasks_per_robot.unwrap_or(25);
     let zones_total = zones_total.unwrap_or(2);
     let work_ms = work_ms.unwrap_or(5);
+    if robots == 0 {
+        eprintln!("benchmark error: robots must be > 0");
+        return;
+    }
+    if tasks_per_robot == 0 {
+        eprintln!("benchmark error: tasks_per_robot must be > 0");
+        return;
+    }
     if zones_total == 0 {
         eprintln!("benchmark error: zones must be > 0");
         return;
@@ -475,6 +529,14 @@ pub fn run_stress(
     let robot_sets = robot_sets.unwrap_or_else(|| default_robot_sets.to_vec());
     let task_sets = task_sets.unwrap_or_else(|| default_task_sets.to_vec());
     let mut zone_sets = zone_sets.unwrap_or_else(|| default_zone_sets.to_vec());
+    if robot_sets.iter().any(|&robots| robots == 0) {
+        eprintln!("stress error: robot_sets must be > 0");
+        return;
+    }
+    if task_sets.iter().any(|&tasks| tasks == 0) {
+        eprintln!("stress error: task_sets must be > 0");
+        return;
+    }
     if zone_sets.iter().any(|&zones| zones == 0) {
         let before = zone_sets.len();
         zone_sets.retain(|&zones| zones > 0);

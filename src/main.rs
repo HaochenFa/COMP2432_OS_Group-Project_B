@@ -111,6 +111,8 @@ fn main() {
                                     &program,
                                     &format!("bench: invalid robots value: {arg}"),
                                 );
+                            } else if robots == Some(0) {
+                                exit_with_usage(&program, "bench: robots must be > 0");
                             }
                         } else if tasks_per_robot.is_none() {
                             tasks_per_robot = arg.parse::<usize>().ok();
@@ -119,6 +121,8 @@ fn main() {
                                     &program,
                                     &format!("bench: invalid tasks_per_robot value: {arg}"),
                                 );
+                            } else if tasks_per_robot == Some(0) {
+                                exit_with_usage(&program, "bench: tasks_per_robot must be > 0");
                             }
                         } else if zones.is_none() {
                             zones = arg.parse::<u64>().ok();
@@ -176,6 +180,9 @@ fn main() {
                         robot_sets_skipped = true;
                         consumed = true;
                     } else if let Some(values) = parse_usize_list(&arg) {
+                        if values.iter().any(|&robots| robots == 0) {
+                            exit_with_usage(&program, "stress: robot_sets must be > 0");
+                        }
                         robot_sets = Some(values);
                         consumed = true;
                     }
@@ -189,6 +196,9 @@ fn main() {
                         task_sets_skipped = true;
                         consumed = true;
                     } else if let Some(values) = parse_usize_list(&arg) {
+                        if values.iter().any(|&tasks| tasks == 0) {
+                            exit_with_usage(&program, "stress: task_sets must be > 0");
+                        }
                         task_sets = Some(values);
                         consumed = true;
                     }
