@@ -112,4 +112,48 @@ mod tests {
         assert_eq!(received, 99);
         handle.join().expect("blocking pop thread panicked");
     }
+
+    #[test]
+    fn blocking_consumers_each_get_unique_task() {
+        let queue = Arc::new(TaskQueue::new());
+        let consumers = 4;
+        let barrier = Arc::new(Barrier::new(consumers));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let mut handles = Vec::new();
+        for _ in 0..consumers {
+            let queue = Arc::clone(&queue);
+            let barrier = Arc::clone(&barrier);
+            let ready_tx = ready_tx.clone();
+            let done_tx = done_tx.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                ready_tx.send(()).expect("ready");
+                let task = queue.pop_blocking();
+                done_tx.send(task.id).expect("done");
+            }));
+        }
+
+        for _ in 0..consumers {
+            ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready recv");
+        }
+
+        for id in 0..consumers as u64 {
+            queue.push(Task::new(id, format!("task-{id}")));
+        }
+
+        let mut seen = HashSet::new();
+        for _ in 0..consumers {
+            let id = done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("done recv");
+            assert!(seen.insert(id));
+        }
+
+        for handle in handles {
+            handle.join().expect("consumer thread panicked");
+        }
+        assert_eq!(queue.len(), 0);
+    }
 }

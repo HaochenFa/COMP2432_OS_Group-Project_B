@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -9,6 +9,219 @@ use crate::log_dev;
 use crate::task_queue::TaskQueue;
 use crate::types::Task;
 use crate::zones::ZoneAccess;
+
+#[cfg(unix)]
+fn cpu_times_seconds() -> Option<(f64, f64)> {
+    use libc::{getrusage, rusage, RUSAGE_SELF};
+    let mut usage = rusage {
+        ru_utime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_stime: libc::timeval { tv_sec: 0, tv_usec: 0 },
+        ru_maxrss: 0,
+        ru_ixrss: 0,
+        ru_idrss: 0,
+        ru_isrss: 0,
+        ru_minflt: 0,
+        ru_majflt: 0,
+        ru_nswap: 0,
+        ru_inblock: 0,
+        ru_oublock: 0,
+        ru_msgsnd: 0,
+        ru_msgrcv: 0,
+        ru_nsignals: 0,
+        ru_nvcsw: 0,
+        ru_nivcsw: 0,
+    };
+    let rc = unsafe { getrusage(RUSAGE_SELF, &mut usage) };
+    if rc != 0 {
+        return None;
+    }
+    let user = usage.ru_utime.tv_sec as f64 + (usage.ru_utime.tv_usec as f64 / 1_000_000.0);
+    let sys = usage.ru_stime.tv_sec as f64 + (usage.ru_stime.tv_usec as f64 / 1_000_000.0);
+    Some((user, sys))
+}
+
+#[cfg(not(unix))]
+fn cpu_times_seconds() -> Option<(f64, f64)> {
+    None
+}
+
+struct BenchResult {
+    robots: usize,
+    tasks_per_robot: usize,
+    zones_total: u64,
+    total_tasks: usize,
+    elapsed_ms: f64,
+    throughput: f64,
+    avg_zone_wait_us: f64,
+    cpu_user_s: Option<f64>,
+    cpu_sys_s: Option<f64>,
+    leftover: usize,
+    max_occupancy: usize,
+    zone_violation: bool,
+    duplicate_tasks: bool,
+    offline_count: usize,
+}
+
+fn benchmark_once(
+    robots: usize,
+    tasks_per_robot: usize,
+    zones_total: u64,
+    work_ms: u64,
+    validate: bool,
+    simulate_offline: bool,
+) -> BenchResult {
+    let queue = Arc::new(TaskQueue::new());
+    let zones = Arc::new(ZoneAccess::new());
+    let monitor = Arc::new(HealthMonitor::new());
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    let total_tasks = robots * tasks_per_robot;
+    for id in 0..total_tasks {
+        queue.push(Task::new(id as u64, format!("bench-{id}")));
+    }
+    let total_tasks = queue.len();
+
+    let zone_wait_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let occupancy = Arc::new(AtomicUsize::new(0));
+    let max_occupancy = Arc::new(AtomicUsize::new(0));
+    let zone_violation = Arc::new(AtomicBool::new(false));
+    let duplicate_tasks = Arc::new(AtomicBool::new(false));
+    let seen_tasks = if validate {
+        Some(Arc::new(Mutex::new(HashSet::new())))
+    } else {
+        None
+    };
+
+    for robot_id in 0..robots {
+        monitor.register_robot(robot_id as u64);
+    }
+
+    let monitor_thread = {
+        let monitor = Arc::clone(&monitor);
+        let stop_flag = Arc::clone(&stop_flag);
+        thread::spawn(move || {
+            let timeout = Duration::from_millis(500);
+            while !stop_flag.load(Ordering::SeqCst) {
+                let _ = monitor.detect_offline(timeout);
+                thread::sleep(Duration::from_millis(100));
+            }
+        })
+    };
+
+    let mut handles = Vec::new();
+    let cpu_start = cpu_times_seconds();
+    let start = Instant::now();
+    for robot_id in 0..robots {
+        let queue = Arc::clone(&queue);
+        let zones = Arc::clone(&zones);
+        let zone_wait_us = Arc::clone(&zone_wait_us);
+        let monitor = Arc::clone(&monitor);
+        let occupancy = Arc::clone(&occupancy);
+        let max_occupancy = Arc::clone(&max_occupancy);
+        let zone_violation = Arc::clone(&zone_violation);
+        let duplicate_tasks = Arc::clone(&duplicate_tasks);
+        let seen_tasks = seen_tasks.as_ref().map(Arc::clone);
+        handles.push(thread::spawn(move || {
+            let stop_after = if simulate_offline && robots > 1 && robot_id == 0 {
+                tasks_per_robot / 2
+            } else {
+                usize::MAX
+            };
+            let mut completed = 0usize;
+            while completed < tasks_per_robot {
+                let task = queue.pop_blocking();
+                if let Some(seen) = seen_tasks.as_ref() {
+                    let mut guard = seen.lock().expect("seen mutex poisoned");
+                    if !guard.insert(task.id) {
+                        duplicate_tasks.store(true, Ordering::SeqCst);
+                    }
+                }
+                let zone = (task.id % zones_total) + 1;
+                let wait_start = Instant::now();
+                zones.acquire(zone, robot_id as u64);
+                let waited = wait_start.elapsed().as_micros() as u64;
+                zone_wait_us.fetch_add(waited, Ordering::SeqCst);
+                let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
+                let mut prev = max_occupancy.load(Ordering::SeqCst);
+                while current > prev {
+                    match max_occupancy.compare_exchange(
+                        prev,
+                        current,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(next) => prev = next,
+                    }
+                }
+                if current > zones_total as usize {
+                    zone_violation.store(true, Ordering::SeqCst);
+                }
+                if work_ms > 0 {
+                    thread::sleep(Duration::from_millis(work_ms));
+                }
+                let released = zones.release(zone, robot_id as u64);
+                if !released {
+                    log_dev!("[ZONE] bench release failed zone={zone} robot={robot_id}");
+                }
+                occupancy.fetch_sub(1, Ordering::SeqCst);
+                completed += 1;
+                if completed <= stop_after {
+                    monitor.heartbeat(robot_id as u64);
+                }
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("benchmark thread panicked");
+    }
+    stop_flag.store(true, Ordering::SeqCst);
+    monitor_thread
+        .join()
+        .expect("health monitor thread panicked");
+
+    let mut leftover = 0usize;
+    while queue.try_pop().is_some() {
+        leftover += 1;
+    }
+
+    let elapsed_ms = start.elapsed().as_millis() as f64;
+    let throughput = if elapsed_ms > 0.0 {
+        (total_tasks as f64) / (elapsed_ms / 1000.0)
+    } else {
+        0.0
+    };
+    let avg_zone_wait = if total_tasks > 0 {
+        zone_wait_us.load(Ordering::SeqCst) as f64 / total_tasks as f64
+    } else {
+        0.0
+    };
+
+    let (cpu_user_s, cpu_sys_s) = match (cpu_start, cpu_times_seconds()) {
+        (Some((user_start, sys_start)), Some((user_end, sys_end))) => {
+            (Some(user_end - user_start), Some(sys_end - sys_start))
+        }
+        _ => (None, None),
+    };
+
+    BenchResult {
+        robots,
+        tasks_per_robot,
+        zones_total,
+        total_tasks,
+        elapsed_ms,
+        throughput,
+        avg_zone_wait_us: avg_zone_wait,
+        cpu_user_s,
+        cpu_sys_s,
+        leftover,
+        max_occupancy: max_occupancy.load(Ordering::SeqCst),
+        zone_violation: zone_violation.load(Ordering::SeqCst),
+        duplicate_tasks: duplicate_tasks.load(Ordering::SeqCst),
+        offline_count: monitor.offline_robots().len(),
+    }
+}
 
 pub fn run_demo() {
     log_dev!("[DEMO] start");
@@ -166,72 +379,130 @@ pub fn run_benchmark(
     robots: Option<usize>,
     tasks_per_robot: Option<usize>,
     zones_total: Option<u64>,
+    work_ms: Option<u64>,
+    validate: bool,
+    simulate_offline: bool,
 ) {
-    let queue = Arc::new(TaskQueue::new());
-    let zones = Arc::new(ZoneAccess::new());
-
     let robots = robots.unwrap_or(4);
     let tasks_per_robot = tasks_per_robot.unwrap_or(25);
     let zones_total = zones_total.unwrap_or(2);
+    let work_ms = work_ms.unwrap_or(5);
     if zones_total == 0 {
         eprintln!("benchmark error: zones must be > 0");
         return;
     }
-    let total_tasks = robots * tasks_per_robot;
+    let result = benchmark_once(
+        robots,
+        tasks_per_robot,
+        zones_total,
+        work_ms,
+        validate,
+        simulate_offline,
+    );
 
-    for id in 0..total_tasks {
-        queue.push(Task::new(id as u64, format!("bench-{id}")));
+    println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots");
+    let cpu_user = result
+        .cpu_user_s
+        .map(|v| format!("{v:.4}"))
+        .unwrap_or_else(|| "NA".to_string());
+    let cpu_sys = result
+        .cpu_sys_s
+        .map(|v| format!("{v:.4}"))
+        .unwrap_or_else(|| "NA".to_string());
+    println!(
+        "{},{},{},{},{:.2},{:.2},{:.2},{},{},{},{},{},{}",
+        result.robots,
+        result.tasks_per_robot,
+        result.zones_total,
+        result.total_tasks,
+        result.elapsed_ms,
+        result.throughput,
+        result.avg_zone_wait_us,
+        cpu_user,
+        cpu_sys,
+        result.max_occupancy,
+        result.zone_violation,
+        result.duplicate_tasks,
+        result.offline_count
+    );
+    if result.leftover > 0 {
+        eprintln!("# warning,leftover_tasks,{}", result.leftover);
     }
-    let total_tasks = queue.len();
+    if validate {
+        if result.zone_violation {
+            eprintln!("# violation,zone_exclusivity");
+        }
+        if result.duplicate_tasks {
+            eprintln!("# violation,duplicate_tasks");
+        }
+    }
+}
 
-    let zone_wait_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let mut handles = Vec::new();
-    let start = Instant::now();
-    for robot_id in 0..robots {
-        let queue = Arc::clone(&queue);
-        let zones = Arc::clone(&zones);
-        let zone_wait_us = Arc::clone(&zone_wait_us);
-        handles.push(thread::spawn(move || {
-            for _ in 0..tasks_per_robot {
-                let task = queue.pop_blocking();
-                let zone = (task.id % zones_total) + 1;
-                let wait_start = Instant::now();
-                zones.acquire(zone, robot_id as u64);
-                let waited = wait_start.elapsed().as_micros() as u64;
-                zone_wait_us.fetch_add(waited, Ordering::SeqCst);
-                thread::sleep(Duration::from_millis(5));
-                let released = zones.release(zone, robot_id as u64);
-                if !released {
-                    log_dev!("[ZONE] bench release failed zone={zone} robot={robot_id}");
+pub fn run_stress(
+    robot_sets: Option<Vec<usize>>,
+    task_sets: Option<Vec<usize>>,
+    zone_sets: Option<Vec<u64>>,
+    work_ms: Option<u64>,
+    validate: bool,
+    simulate_offline: bool,
+) {
+    let default_robot_sets = [1usize, 2, 4, 8, 12];
+    let default_task_sets = [10usize, 25, 50];
+    let default_zone_sets = [1u64, 2, 4];
+    let work_ms = work_ms.unwrap_or(5);
+
+    let robot_sets = robot_sets.unwrap_or_else(|| default_robot_sets.to_vec());
+    let task_sets = task_sets.unwrap_or_else(|| default_task_sets.to_vec());
+    let zone_sets = zone_sets.unwrap_or_else(|| default_zone_sets.to_vec());
+
+    println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us,cpu_user_s,cpu_sys_s,max_occupancy,zone_violation,duplicate_tasks,offline_robots");
+    for robots in robot_sets {
+        for tasks_per_robot in task_sets.iter().copied() {
+            for zones_total in zone_sets.iter().copied() {
+                let result = benchmark_once(
+                    robots,
+                    tasks_per_robot,
+                    zones_total,
+                    work_ms,
+                    validate,
+                    simulate_offline,
+                );
+                let cpu_user = result
+                    .cpu_user_s
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "NA".to_string());
+                let cpu_sys = result
+                    .cpu_sys_s
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "NA".to_string());
+                println!(
+                    "{},{},{},{},{:.2},{:.2},{:.2},{},{},{},{},{},{}",
+                    result.robots,
+                    result.tasks_per_robot,
+                    result.zones_total,
+                    result.total_tasks,
+                    result.elapsed_ms,
+                    result.throughput,
+                    result.avg_zone_wait_us,
+                    cpu_user,
+                    cpu_sys,
+                    result.max_occupancy,
+                    result.zone_violation,
+                    result.duplicate_tasks,
+                    result.offline_count
+                );
+                if result.leftover > 0 {
+                    eprintln!("# warning,leftover_tasks,{}", result.leftover);
+                }
+                if validate {
+                    if result.zone_violation {
+                        eprintln!("# violation,zone_exclusivity");
+                    }
+                    if result.duplicate_tasks {
+                        eprintln!("# violation,duplicate_tasks");
+                    }
                 }
             }
-        }));
-    }
-
-    for handle in handles {
-        handle.join().expect("benchmark thread panicked");
-    }
-    let mut leftover = 0usize;
-    while queue.try_pop().is_some() {
-        leftover += 1;
-    }
-    let elapsed_ms = start.elapsed().as_millis() as f64;
-    let throughput = if elapsed_ms > 0.0 {
-        (total_tasks as f64) / (elapsed_ms / 1000.0)
-    } else {
-        0.0
-    };
-    let avg_zone_wait = if total_tasks > 0 {
-        zone_wait_us.load(Ordering::SeqCst) as f64 / total_tasks as f64
-    } else {
-        0.0
-    };
-
-    println!("robots,tasks_per_robot,zones,total_tasks,elapsed_ms,throughput_tasks_per_s,avg_zone_wait_us");
-    println!(
-        "{robots},{tasks_per_robot},{zones_total},{total_tasks},{elapsed_ms:.2},{throughput:.2},{avg_zone_wait:.2}"
-    );
-    if leftover > 0 {
-        eprintln!("# warning,leftover_tasks,{}", leftover);
+        }
     }
 }
