@@ -124,6 +124,8 @@ fn main() {
                                     &program,
                                     &format!("bench: invalid zones value: {arg}"),
                                 );
+                            } else if zones == Some(0) {
+                                exit_with_usage(&program, "bench: zones must be > 0");
                             }
                         } else if work_ms.is_none() {
                             work_ms = arg.parse::<u64>().ok();
