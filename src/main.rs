@@ -219,6 +219,18 @@ fn main() {
                 exit_with_usage(&program, &format!("stress: unexpected argument: {arg}"));
             }
 
+            if let Some(zones) = zone_sets.as_mut() {
+                let before = zones.len();
+                zones.retain(|&zones| zones > 0);
+                let dropped = before.saturating_sub(zones.len());
+                if dropped > 0 {
+                    eprintln!("stress warning: ignored {dropped} zone set(s) <= 0");
+                }
+                if zones.is_empty() {
+                    exit_with_usage(&program, "stress: zones must be > 0");
+                }
+            }
+
             sim::run_stress(
                 robot_sets,
                 task_sets,
