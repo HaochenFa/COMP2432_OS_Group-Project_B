@@ -108,7 +108,9 @@ fn benchmark_once(
 
     let total_tasks = robots * tasks_per_robot;
     for id in 0..total_tasks {
-        queue.push(Task::new(id as u64, format!("bench-{id}")));
+        queue
+            .push(Task::new(id as u64, format!("bench-{id}")))
+            .expect("task queue closed");
     }
     let total_tasks = queue.len();
 
@@ -294,7 +296,9 @@ pub fn run_demo() {
     let per_zone_occupancy = Arc::new(init_zone_counters(zones_total));
 
     for id in 0..(robots * tasks_per_robot) {
-        queue.push(Task::new(id as u64, format!("deliver-{id}")));
+        queue
+            .push(Task::new(id as u64, format!("deliver-{id}")))
+            .expect("task queue closed");
     }
     log_dev!(
         "[QUEUE] loaded tasks total={} per_robot={}",
