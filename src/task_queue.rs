@@ -39,17 +39,13 @@ impl TaskQueue {
         guard.queue.pop_front()
     }
 
+    #[deprecated(note = "use pop_blocking_or_closed for shutdown-aware waits")]
+    #[allow(dead_code)]
     pub fn pop_blocking(&self) -> Task {
-        let mut guard = self.inner.lock().expect("task queue mutex poisoned");
-        loop {
-            if let Some(task) = guard.queue.pop_front() {
-                return task;
-            }
-            guard = self.available.wait(guard).expect("condvar wait failed");
-        }
+        self.pop_blocking_or_closed()
+            .expect("task queue closed")
     }
 
-    #[allow(dead_code)]
     pub fn pop_blocking_or_closed(&self) -> Option<Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
         loop {
@@ -92,7 +88,7 @@ mod tests {
         for id in 0..total_tasks {
             queue
                 .push(Task::new(id, format!("task-{id}")))
-                .expect("queue closed");
+                .expect("task queue closed");
         }
 
         let consumers = 4;
@@ -136,12 +132,16 @@ mod tests {
         let queue_clone = Arc::clone(&queue);
         let handle = thread::spawn(move || {
             ready_tx.send(()).expect("send ready");
-            let task = queue_clone.pop_blocking();
+            let task = queue_clone
+                .pop_blocking_or_closed()
+                .expect("task queue closed");
             tx.send(task.id).expect("send task id");
         });
 
         ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready");
-        queue.push(Task::new(99, "wake")).expect("queue closed");
+        queue
+            .push(Task::new(99, "wake"))
+            .expect("task queue closed");
 
         let received = rx.recv_timeout(Duration::from_secs(1)).expect("receive task id");
         assert_eq!(received, 99);
@@ -165,7 +165,9 @@ mod tests {
             handles.push(thread::spawn(move || {
                 barrier.wait();
                 ready_tx.send(()).expect("ready");
-                let task = queue.pop_blocking();
+                let task = queue
+                    .pop_blocking_or_closed()
+                    .expect("task queue closed");
                 done_tx.send(task.id).expect("done");
             }));
         }
@@ -177,7 +179,7 @@ mod tests {
         for id in 0..consumers as u64 {
             queue
                 .push(Task::new(id, format!("task-{id}")))
-                .expect("queue closed");
+                .expect("task queue closed");
         }
 
         let mut seen = HashSet::new();

@@ -164,7 +164,9 @@ fn benchmark_once(
             };
             let mut completed = 0usize;
             while completed < tasks_per_robot {
-                let task = queue.pop_blocking();
+                let task = queue
+                    .pop_blocking_or_closed()
+                    .expect("task queue closed");
                 if let Some(seen) = seen_tasks.as_ref() {
                     let mut guard = seen.lock().expect("seen mutex poisoned");
                     if !guard.insert(task.id) {
@@ -349,7 +351,9 @@ pub fn run_demo() {
                 let mut completed = 0;
                 let stop_heartbeat_after = if robot_id == 1 { 2 } else { usize::MAX };
                 while completed < tasks_per_robot {
-                    let task = queue.pop_blocking();
+                    let task = queue
+                        .pop_blocking_or_closed()
+                        .expect("task queue closed");
                     per_robot_tasks[robot_id].fetch_add(1, Ordering::SeqCst);
                     log_dev!("[QUEUE] {name} fetched task {}", task.id);
                     let zone = (task.id % zones_total as u64) + 1;
