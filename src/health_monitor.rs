@@ -69,15 +69,13 @@ impl HealthMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
     fn detects_offline_after_timeout() {
         let monitor = HealthMonitor::new();
         let robot = 7;
-        monitor.register_robot(robot);
-        monitor.heartbeat(robot);
-        thread::sleep(Duration::from_millis(30));
+        let past = Instant::now() - Duration::from_millis(50);
+        monitor.set_last_seen_for_test(robot, past);
         let offline = monitor.detect_offline(Duration::from_millis(10));
         assert!(offline.contains(&robot));
     }
@@ -86,8 +84,8 @@ mod tests {
     fn marks_never_heartbeat_after_timeout() {
         let monitor = HealthMonitor::new();
         let robot = 11;
-        monitor.register_robot(robot);
-        thread::sleep(Duration::from_millis(20));
+        let past = Instant::now() - Duration::from_millis(30);
+        monitor.set_last_seen_for_test(robot, past);
         let offline = monitor.detect_offline(Duration::from_millis(5));
         assert!(offline.contains(&robot));
     }
@@ -96,8 +94,8 @@ mod tests {
     fn heartbeat_clears_offline() {
         let monitor = HealthMonitor::new();
         let robot = 21;
-        monitor.register_robot(robot);
-        thread::sleep(Duration::from_millis(20));
+        let past = Instant::now() - Duration::from_millis(30);
+        monitor.set_last_seen_for_test(robot, past);
         monitor.detect_offline(Duration::from_millis(5));
         assert!(monitor.offline_robots().contains(&robot));
         monitor.heartbeat(robot);
