@@ -68,8 +68,8 @@ impl HealthMonitor {
         guard.offline.clone()
     }
 
-    #[cfg(test)]
     /// Test-only hook to set deterministic timestamps without sleeping.
+    #[cfg(test)]
     fn set_last_seen_for_test(&self, robot: RobotId, instant: Instant) {
         let mut guard = self.state.lock().expect("health monitor mutex poisoned");
         guard.last_seen.insert(robot, instant);

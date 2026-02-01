@@ -21,8 +21,8 @@ const BENCH_OFFLINE_MAX_WAIT_MS: u64 = 1000;
 // Polling interval used while waiting for offline detection.
 const OFFLINE_POLL_MS: u64 = 50;
 
-#[cfg(unix)]
 /// Best-effort CPU user/system time snapshot (seconds) on Unix platforms.
+#[cfg(unix)]
 fn cpu_times_seconds() -> Option<(f64, f64)> {
     use libc::{RUSAGE_SELF, getrusage, rusage};
     let mut usage = rusage {
@@ -58,8 +58,8 @@ fn cpu_times_seconds() -> Option<(f64, f64)> {
     Some((user, sys))
 }
 
-#[cfg(not(unix))]
 /// Stub on non-Unix platforms.
+#[cfg(not(unix))]
 fn cpu_times_seconds() -> Option<(f64, f64)> {
     None
 }

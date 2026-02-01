@@ -20,8 +20,8 @@ pub fn dev_log(args: Arguments) {
     println!("[{ts}ms][{thread_name}] {args}");
 }
 
-#[macro_export]
 /// Convenience macro for debug-only logging.
+#[macro_export]
 macro_rules! log_dev {
     ($($arg:tt)*) => {
         if cfg!(debug_assertions) {

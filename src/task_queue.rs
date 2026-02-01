@@ -66,8 +66,8 @@ impl TaskQueue {
         }
     }
 
-    #[allow(dead_code)]
     /// Close the queue and wake all blocked consumers.
+    #[allow(dead_code)]
     pub fn close(&self) {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
         guard.closed = true;
