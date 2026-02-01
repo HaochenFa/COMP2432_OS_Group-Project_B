@@ -1,3 +1,5 @@
+//! Project Blaze CLI entry point and argument parsing.
+
 mod health_monitor;
 mod logging;
 mod sim;
@@ -7,6 +9,7 @@ mod zones;
 
 use std::io::Write;
 
+// Parse a comma-separated list of usize values, or "-" to mean "skip".
 fn parse_usize_list(arg: &str) -> Option<Vec<usize>> {
     if arg == "-" {
         return None;
@@ -22,6 +25,7 @@ fn parse_usize_list(arg: &str) -> Option<Vec<usize>> {
     Some(values)
 }
 
+// Parse a comma-separated list of u64 values, or "-" to mean "skip".
 fn parse_u64_list(arg: &str) -> Option<Vec<u64>> {
     if arg == "-" {
         return None;
@@ -37,6 +41,7 @@ fn parse_u64_list(arg: &str) -> Option<Vec<u64>> {
     Some(values)
 }
 
+// Emit usage text to any writer (stdout or stderr).
 fn write_usage<W: Write>(out: &mut W, program: &str) {
     let _ = writeln!(out, "Project Blaze CLI");
     let _ = writeln!(out, "Usage:");
@@ -57,7 +62,10 @@ fn write_usage<W: Write>(out: &mut W, program: &str) {
     );
     let _ = writeln!(out, "Omit work_ms to keep its default.");
     let _ = writeln!(out, "Defaults:");
-    let _ = writeln!(out, "  bench  robots=4 tasks_per_robot=25 zones=2 work_ms=5");
+    let _ = writeln!(
+        out,
+        "  bench  robots=4 tasks_per_robot=25 zones=2 work_ms=5"
+    );
     let _ = writeln!(
         out,
         "  stress robots=1,2,4,8,12 tasks_per_robot=10,25,50 zones=1,2,4 work_ms=5"
@@ -70,16 +78,19 @@ fn write_usage<W: Write>(out: &mut W, program: &str) {
     );
 }
 
+// Print usage to stdout (for --help).
 fn print_usage_stdout(program: &str) {
     let mut out = std::io::stdout();
     write_usage(&mut out, program);
 }
 
+// Print usage to stderr (for input errors).
 fn print_usage_stderr(program: &str) {
     let mut out = std::io::stderr();
     write_usage(&mut out, program);
 }
 
+// Exit with a message and usage.
 fn exit_with_usage(program: &str, message: &str) -> ! {
     eprintln!("{message}");
     print_usage_stderr(program);
@@ -87,12 +98,14 @@ fn exit_with_usage(program: &str, message: &str) -> ! {
 }
 
 fn main() {
+    // First arg is the program name; default to a friendly fallback.
     let program = std::env::args()
         .next()
         .unwrap_or_else(|| "project_blaze".to_string());
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("bench") => {
+            // Simple positional CLI parsing for a single benchmark run.
             let mut robots: Option<usize> = None;
             let mut tasks_per_robot: Option<usize> = None;
             let mut zones: Option<u64> = None;
@@ -143,14 +156,25 @@ fn main() {
                                 );
                             }
                         } else {
-                            exit_with_usage(&program, &format!("bench: unexpected argument: {arg}"));
+                            exit_with_usage(
+                                &program,
+                                &format!("bench: unexpected argument: {arg}"),
+                            );
                         }
                     }
                 }
             }
-            sim::run_benchmark(robots, tasks_per_robot, zones, work_ms, validate, simulate_offline);
+            sim::run_benchmark(
+                robots,
+                tasks_per_robot,
+                zones,
+                work_ms,
+                validate,
+                simulate_offline,
+            );
         }
         Some("stress") => {
+            // Parse list-based inputs and flags for a stress sweep.
             let mut robot_sets: Option<Vec<usize>> = None;
             let mut task_sets: Option<Vec<usize>> = None;
             let mut zone_sets: Option<Vec<u64>> = None;
@@ -187,7 +211,10 @@ fn main() {
                         consumed = true;
                     }
                     if !consumed {
-                        exit_with_usage(&program, &format!("stress: invalid robot_sets value: {arg}"));
+                        exit_with_usage(
+                            &program,
+                            &format!("stress: invalid robot_sets value: {arg}"),
+                        );
                     }
                     continue;
                 }
@@ -203,7 +230,10 @@ fn main() {
                         consumed = true;
                     }
                     if !consumed {
-                        exit_with_usage(&program, &format!("stress: invalid task_sets value: {arg}"));
+                        exit_with_usage(
+                            &program,
+                            &format!("stress: invalid task_sets value: {arg}"),
+                        );
                     }
                     continue;
                 }
@@ -216,7 +246,10 @@ fn main() {
                         consumed = true;
                     }
                     if !consumed {
-                        exit_with_usage(&program, &format!("stress: invalid zone_sets value: {arg}"));
+                        exit_with_usage(
+                            &program,
+                            &format!("stress: invalid zone_sets value: {arg}"),
+                        );
                     }
                     continue;
                 }

@@ -1,8 +1,11 @@
+//! Thread-safe FIFO task queue with blocking and non-blocking consumers.
+
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 
 use crate::types::Task;
 
+/// A minimal, synchronized FIFO queue for robot tasks.
 pub struct TaskQueue {
     inner: Mutex<TaskQueueState>,
     available: Condvar,
@@ -14,6 +17,7 @@ struct TaskQueueState {
 }
 
 impl TaskQueue {
+    /// Create an empty task queue.
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(TaskQueueState {
@@ -24,6 +28,7 @@ impl TaskQueue {
         }
     }
 
+    /// Push a task; returns the task back if the queue is closed.
     pub fn push(&self, task: Task) -> Result<(), Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
         if guard.closed {
@@ -34,6 +39,7 @@ impl TaskQueue {
         Ok(())
     }
 
+    /// Try to pop immediately without blocking.
     pub fn try_pop(&self) -> Option<Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
         guard.queue.pop_front()
@@ -42,10 +48,10 @@ impl TaskQueue {
     #[deprecated(note = "use pop_blocking_or_closed for shutdown-aware waits")]
     #[allow(dead_code)]
     pub fn pop_blocking(&self) -> Task {
-        self.pop_blocking_or_closed()
-            .expect("task queue closed")
+        self.pop_blocking_or_closed().expect("task queue closed")
     }
 
+    /// Block until a task is available or the queue is closed.
     pub fn pop_blocking_or_closed(&self) -> Option<Task> {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
         loop {
@@ -55,10 +61,12 @@ impl TaskQueue {
             if guard.closed {
                 return None;
             }
+            // Wait releases the lock and re-acquires it before returning.
             guard = self.available.wait(guard).expect("condvar wait failed");
         }
     }
 
+    /// Close the queue and wake all blocked consumers.
     #[allow(dead_code)]
     pub fn close(&self) {
         let mut guard = self.inner.lock().expect("task queue mutex poisoned");
@@ -66,6 +74,7 @@ impl TaskQueue {
         self.available.notify_all();
     }
 
+    /// Current number of queued tasks.
     pub fn len(&self) -> usize {
         let guard = self.inner.lock().expect("task queue mutex poisoned");
         guard.queue.len()
@@ -76,8 +85,8 @@ impl TaskQueue {
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::sync::{Arc, Barrier, Mutex};
     use std::sync::mpsc;
+    use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
     use std::time::Duration;
 
@@ -106,6 +115,7 @@ mod tests {
                     match queue.try_pop() {
                         Some(task) => {
                             let mut guard = seen.lock().expect("seen mutex poisoned");
+                            // Each task id should be observed at most once.
                             assert!(guard.insert(task.id));
                         }
                         None => break,
@@ -138,12 +148,17 @@ mod tests {
             tx.send(task.id).expect("send task id");
         });
 
-        ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready");
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("ready");
+        // Pushing after the consumer blocks should wake it.
         queue
             .push(Task::new(99, "wake"))
             .expect("task queue closed");
 
-        let received = rx.recv_timeout(Duration::from_secs(1)).expect("receive task id");
+        let received = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("receive task id");
         assert_eq!(received, 99);
         handle.join().expect("blocking pop thread panicked");
     }
@@ -165,17 +180,18 @@ mod tests {
             handles.push(thread::spawn(move || {
                 barrier.wait();
                 ready_tx.send(()).expect("ready");
-                let task = queue
-                    .pop_blocking_or_closed()
-                    .expect("task queue closed");
+                let task = queue.pop_blocking_or_closed().expect("task queue closed");
                 done_tx.send(task.id).expect("done");
             }));
         }
 
         for _ in 0..consumers {
-            ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready recv");
+            ready_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("ready recv");
         }
 
+        // Provide exactly one task per consumer.
         for id in 0..consumers as u64 {
             queue
                 .push(Task::new(id, format!("task-{id}")))
@@ -209,7 +225,9 @@ mod tests {
             done_tx.send(task.is_none()).expect("done");
         });
 
-        ready_rx.recv_timeout(Duration::from_secs(1)).expect("ready");
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("ready");
         queue.close();
 
         let closed = done_rx
