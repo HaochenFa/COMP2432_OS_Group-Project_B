@@ -64,6 +64,8 @@ fn cpu_times_seconds() -> Option<(f64, f64)> {
     None
 }
 
+/// Spawn a background thread that periodically runs offline detection
+/// using the provided `HealthMonitor` until `stop_flag` is set.
 fn spawn_health_monitor(
     monitor: Arc<HealthMonitor>,
     stop_flag: Arc<AtomicBool>,
@@ -101,6 +103,7 @@ fn init_zone_counters(zones_total: usize) -> Vec<AtomicUsize> {
     counters
 }
 
+/// Tracks aggregate and per-zone occupancy metrics and constraint violations.
 struct ZoneMetrics {
     occupancy: AtomicUsize,
     max_occupancy: AtomicUsize,
