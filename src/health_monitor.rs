@@ -17,6 +17,24 @@ pub struct HealthMonitor {
 }
 
 impl HealthMonitor {
+    fn overdue_robots(
+        state: &HealthState,
+        now: Instant,
+        timeout: Duration,
+    ) -> Vec<RobotId> {
+        state
+            .last_seen
+            .iter()
+            .filter_map(|(&robot, &last)| {
+                if now.duration_since(last) > timeout {
+                    Some(robot)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Create an empty health monitor.
     pub fn new() -> Self {
         Self {
@@ -45,21 +63,22 @@ impl HealthMonitor {
         let mut guard = self.state.lock().expect("health monitor mutex poisoned");
         let now = Instant::now();
         // Collect overdue robots first to avoid mutating while iterating.
-        let overdue: Vec<RobotId> = guard
-            .last_seen
-            .iter()
-            .filter_map(|(&robot, &last)| {
-                if now.duration_since(last) > timeout {
-                    Some(robot)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let overdue = Self::overdue_robots(&guard, now, timeout);
         for robot in overdue {
             guard.offline.insert(robot);
         }
         guard.offline.clone()
+    }
+
+    /// Detect offline robots and report whether any are offline.
+    pub fn detect_offline_any(&self, timeout: Duration) -> bool {
+        let mut guard = self.state.lock().expect("health monitor mutex poisoned");
+        let now = Instant::now();
+        let overdue = Self::overdue_robots(&guard, now, timeout);
+        for robot in overdue {
+            guard.offline.insert(robot);
+        }
+        !guard.offline.is_empty()
     }
 
     /// Snapshot of the robots currently marked offline.

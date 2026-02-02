@@ -64,6 +64,20 @@ fn cpu_times_seconds() -> Option<(f64, f64)> {
     None
 }
 
+fn spawn_health_monitor(
+    monitor: Arc<HealthMonitor>,
+    stop_flag: Arc<AtomicBool>,
+    timeout: Duration,
+    poll: Duration,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        while !stop_flag.load(Ordering::SeqCst) {
+            let _ = monitor.detect_offline_any(timeout);
+            thread::sleep(poll);
+        }
+    })
+}
+
 /// Wait until at least one robot is offline or a max wait is reached.
 fn wait_for_offline(monitor: &HealthMonitor, timeout_ms: u64, max_wait_ms: u64) {
     let max_wait = Duration::from_millis(max_wait_ms);
@@ -71,7 +85,7 @@ fn wait_for_offline(monitor: &HealthMonitor, timeout_ms: u64, max_wait_ms: u64) 
     let timeout = Duration::from_millis(timeout_ms);
     let start = Instant::now();
     loop {
-        if !monitor.detect_offline(timeout).is_empty() || start.elapsed() >= max_wait {
+        if monitor.detect_offline_any(timeout) || start.elapsed() >= max_wait {
             return;
         }
         thread::sleep(poll);
@@ -85,6 +99,74 @@ fn init_zone_counters(zones_total: usize) -> Vec<AtomicUsize> {
         counters.push(AtomicUsize::new(0));
     }
     counters
+}
+
+struct ZoneMetrics {
+    occupancy: AtomicUsize,
+    max_occupancy: AtomicUsize,
+    zone_violation: AtomicBool,
+    per_zone_occupancy: Vec<AtomicUsize>,
+}
+
+impl ZoneMetrics {
+    fn new(zones_total: usize) -> Self {
+        Self {
+            occupancy: AtomicUsize::new(0),
+            max_occupancy: AtomicUsize::new(0),
+            zone_violation: AtomicBool::new(false),
+            per_zone_occupancy: init_zone_counters(zones_total),
+        }
+    }
+
+    fn enter(&self, zone: u64, zones_total: usize) {
+        let current = self.occupancy.fetch_add(1, Ordering::SeqCst) + 1;
+        let zone_index = zone as usize;
+        // Zone ids are 1-based; index 0 is unused.
+        debug_assert!(zone_index <= zones_total, "zone index out of range");
+        let zone_count = self.per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst) + 1;
+        if zone_count > 1 {
+            self.zone_violation.store(true, Ordering::SeqCst);
+        }
+        let mut prev = self.max_occupancy.load(Ordering::SeqCst);
+        while current > prev {
+            match self.max_occupancy.compare_exchange(
+                prev,
+                current,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(next) => prev = next,
+            }
+        }
+        if current > zones_total {
+            self.zone_violation.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn pre_release(&self, zone: u64, zones_total: usize) {
+        let zone_index = zone as usize;
+        debug_assert!(zone_index <= zones_total, "zone index out of range");
+        let zone_prev = self.per_zone_occupancy[zone_index].fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(zone_prev > 0, "zone counter underflow");
+        let occ_prev = self.occupancy.fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(occ_prev > 0, "occupancy counter underflow");
+    }
+
+    fn revert_pre_release(&self, zone: u64, zones_total: usize) {
+        let zone_index = zone as usize;
+        debug_assert!(zone_index <= zones_total, "zone index out of range");
+        self.per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst);
+        self.occupancy.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn max_occupancy(&self) -> usize {
+        self.max_occupancy.load(Ordering::SeqCst)
+    }
+
+    fn has_violation(&self) -> bool {
+        self.zone_violation.load(Ordering::SeqCst)
+    }
 }
 
 /// Aggregated metrics from a single benchmark run.
@@ -132,10 +214,7 @@ fn benchmark_once(
 
     // Total wait time across all zone acquisitions for averaging.
     let zone_wait_us = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let occupancy = Arc::new(AtomicUsize::new(0));
-    let max_occupancy = Arc::new(AtomicUsize::new(0));
-    let zone_violation = Arc::new(AtomicBool::new(false));
-    let per_zone_occupancy = Arc::new(init_zone_counters(zones_len));
+    let zone_metrics = Arc::new(ZoneMetrics::new(zones_len));
     let duplicate_tasks = Arc::new(AtomicBool::new(false));
     let seen_tasks = if validate {
         Some(Arc::new(Mutex::new(HashSet::new())))
@@ -147,17 +226,12 @@ fn benchmark_once(
         monitor.register_robot(robot_id as u64);
     }
 
-    let monitor_thread = {
-        let monitor = Arc::clone(&monitor);
-        let stop_flag = Arc::clone(&stop_flag);
-        thread::spawn(move || {
-            let timeout = Duration::from_millis(BENCH_OFFLINE_TIMEOUT_MS);
-            while !stop_flag.load(Ordering::SeqCst) {
-                let _ = monitor.detect_offline(timeout);
-                thread::sleep(Duration::from_millis(100));
-            }
-        })
-    };
+    let monitor_thread = spawn_health_monitor(
+        Arc::clone(&monitor),
+        Arc::clone(&stop_flag),
+        Duration::from_millis(BENCH_OFFLINE_TIMEOUT_MS),
+        Duration::from_millis(100),
+    );
 
     let mut handles = Vec::new();
     let cpu_start = cpu_times_seconds();
@@ -167,10 +241,7 @@ fn benchmark_once(
         let zones = Arc::clone(&zones);
         let zone_wait_us = Arc::clone(&zone_wait_us);
         let monitor = Arc::clone(&monitor);
-        let occupancy = Arc::clone(&occupancy);
-        let max_occupancy = Arc::clone(&max_occupancy);
-        let zone_violation = Arc::clone(&zone_violation);
-        let per_zone_occupancy = Arc::clone(&per_zone_occupancy);
+        let zone_metrics = Arc::clone(&zone_metrics);
         let duplicate_tasks = Arc::clone(&duplicate_tasks);
         let seen_tasks = seen_tasks.as_ref().map(Arc::clone);
         handles.push(thread::spawn(move || {
@@ -193,40 +264,16 @@ fn benchmark_once(
                 zones.acquire(zone, robot_id as u64);
                 let waited = wait_start.elapsed().as_micros() as u64;
                 zone_wait_us.fetch_add(waited, Ordering::SeqCst);
-                let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
-                let zone_index = zone as usize;
-                // Zone ids are 1-based; index 0 is unused.
-                debug_assert!(zone_index <= zones_len, "zone index out of range");
-                let zone_count = per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst) + 1;
-                if zone_count > 1 {
-                    zone_violation.store(true, Ordering::SeqCst);
-                }
-                let mut prev = max_occupancy.load(Ordering::SeqCst);
-                while current > prev {
-                    match max_occupancy.compare_exchange(
-                        prev,
-                        current,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(_) => break,
-                        Err(next) => prev = next,
-                    }
-                }
-                if current > zones_len {
-                    zone_violation.store(true, Ordering::SeqCst);
-                }
+                zone_metrics.enter(zone, zones_len);
                 if work_ms > 0 {
                     thread::sleep(Duration::from_millis(work_ms));
                 }
+                zone_metrics.pre_release(zone, zones_len);
                 let released = zones.release(zone, robot_id as u64);
                 if !released {
                     log_dev!("[ZONE] bench release failed zone={zone} robot={robot_id}");
+                    zone_metrics.revert_pre_release(zone, zones_len);
                 }
-                if released {
-                    per_zone_occupancy[zone_index].fetch_sub(1, Ordering::SeqCst);
-                }
-                occupancy.fetch_sub(1, Ordering::SeqCst);
                 completed += 1;
                 // Optionally stop heartbeats early to simulate offline detection.
                 if completed <= stop_after {
@@ -287,8 +334,8 @@ fn benchmark_once(
         cpu_user_s,
         cpu_sys_s,
         leftover,
-        max_occupancy: max_occupancy.load(Ordering::SeqCst),
-        zone_violation: zone_violation.load(Ordering::SeqCst),
+        max_occupancy: zone_metrics.max_occupancy(),
+        zone_violation: zone_metrics.has_violation(),
         duplicate_tasks: duplicate_tasks.load(Ordering::SeqCst),
         offline_count: monitor.offline_robots().len(),
     }
@@ -308,10 +355,7 @@ pub fn run_demo() {
 
     // Track per-robot completions for the final summary.
     let per_robot_tasks = Arc::new((0..robots).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
-    let occupancy = Arc::new(AtomicUsize::new(0));
-    let max_occupancy = Arc::new(AtomicUsize::new(0));
-    let zone_violation = Arc::new(AtomicBool::new(false));
-    let per_zone_occupancy = Arc::new(init_zone_counters(zones_total));
+    let zone_metrics = Arc::new(ZoneMetrics::new(zones_total));
 
     for id in 0..(robots * tasks_per_robot) {
         queue
@@ -356,10 +400,7 @@ pub fn run_demo() {
         let zones = Arc::clone(&zones);
         let monitor = Arc::clone(&monitor);
         let per_robot_tasks = Arc::clone(&per_robot_tasks);
-        let occupancy = Arc::clone(&occupancy);
-        let max_occupancy = Arc::clone(&max_occupancy);
-        let zone_violation = Arc::clone(&zone_violation);
-        let per_zone_occupancy = Arc::clone(&per_zone_occupancy);
+        let zone_metrics = Arc::clone(&zone_metrics);
         let name = format!("robot-{robot_id}");
         let handle = thread::Builder::new()
             .name(name.clone())
@@ -373,40 +414,15 @@ pub fn run_demo() {
                     log_dev!("[QUEUE] {name} fetched task {}", task.id);
                     let zone = (task.id % zones_total as u64) + 1;
                     zones.acquire(zone, robot_id as u64);
-                    let current = occupancy.fetch_add(1, Ordering::SeqCst) + 1;
-                    let zone_index = zone as usize;
-                    // Zone ids are 1-based; index 0 is unused.
-                    debug_assert!(zone_index <= zones_total, "zone index out of range");
-                    let zone_count =
-                        per_zone_occupancy[zone_index].fetch_add(1, Ordering::SeqCst) + 1;
-                    if zone_count > 1 {
-                        zone_violation.store(true, Ordering::SeqCst);
-                    }
-                    let mut prev = max_occupancy.load(Ordering::SeqCst);
-                    while current > prev {
-                        match max_occupancy.compare_exchange(
-                            prev,
-                            current,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        ) {
-                            Ok(_) => break,
-                            Err(next) => prev = next,
-                        }
-                    }
-                    if current > zones_total {
-                        zone_violation.store(true, Ordering::SeqCst);
-                    }
+                    zone_metrics.enter(zone, zones_total);
                     log_dev!("[ZONE] {name} entered zone {zone} for task {}", task.id);
                     thread::sleep(Duration::from_millis(80));
+                    zone_metrics.pre_release(zone, zones_total);
                     let released = zones.release(zone, robot_id as u64);
                     if !released {
                         log_dev!("[ZONE] {name} failed to release zone {zone}");
+                        zone_metrics.revert_pre_release(zone, zones_total);
                     }
-                    if released {
-                        per_zone_occupancy[zone_index].fetch_sub(1, Ordering::SeqCst);
-                    }
-                    occupancy.fetch_sub(1, Ordering::SeqCst);
                     log_dev!("[ZONE] {name} left zone {zone} for task {}", task.id);
                     completed += 1;
                     if completed <= stop_heartbeat_after {
@@ -452,9 +468,9 @@ pub fn run_demo() {
     println!("tasks_per_robot_done={:?}", tasks_done);
     println!(
         "max_zone_occupancy_observed={}",
-        max_occupancy.load(Ordering::SeqCst)
+        zone_metrics.max_occupancy()
     );
-    println!("zone_violation={}", zone_violation.load(Ordering::SeqCst));
+    println!("zone_violation={}", zone_metrics.has_violation());
     println!("offline_robots={:?}", offline);
 }
 
