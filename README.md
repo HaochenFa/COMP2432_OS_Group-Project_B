@@ -1,4 +1,4 @@
-# Project Blaze (COMP2432 Project B)
+# Medical Care Robot Coordination System (MCRoCS)
 
 Lightweight OS core that coordinates multiple medical-care robots with safe concurrency.
 This repository implements the minimal required scope: task queue, zone access control, and
@@ -108,7 +108,6 @@ project_blaze/
 |-- ROADMAP.md
 |-- project_B_guidelines.md
 |-- Project-B.pdf
-|-- report_0201.md
 |-- DIAGRAMS.md
 `-- src/
     |-- main.rs

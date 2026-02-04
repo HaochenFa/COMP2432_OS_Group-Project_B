@@ -1,4 +1,4 @@
-# Project Blaze Diagrams
+# Medical Care Robot Coordination System (MCRoCS) Diagrams
 
 The diagrams below are written in Mermaid for easy rendering in Markdown viewers
 that support it (GitHub, GitLab, many IDEs).
